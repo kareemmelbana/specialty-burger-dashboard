@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { createClient } from "@supabase/supabase-js";
 import {
-  categoriesBySales, dashboardSeries, images,
+  categoriesBySales, dashboardSeries,
   type Category, type Offer, type Product,
 } from "./demo-data";
 
@@ -36,17 +36,32 @@ export const getGetRestaurantSettingsQueryKey = () => ["restaurant-settings"];
 export const getListReviewsQueryKey = () => ["reviews"];
 export const getListNotificationsQueryKey = () => ["notifications"];
 
+
+const normalizeImage = (value: unknown): string => {
+  const image = String(value ?? "").trim();
+  if (!image) return "";
+  try {
+    const url = new URL(image);
+    if (url.hostname === "specialty-burger.vercel.app" && url.pathname.startsWith("/menu/")) {
+      return `${url.pathname}${url.search}`;
+    }
+    return image;
+  } catch {
+    return image.startsWith("menu/") ? `/${image}` : image;
+  }
+};
+
 const productFromRow = (r: any): Product => ({
   id: r.id, name: r.name, nameAr: r.name_ar ?? "", description: r.description ?? "",
   price: Number(r.price ?? 0), discountPrice: r.discount_price == null ? null : Number(r.discount_price),
   categoryId: r.category_id ?? "", category: r.category_name ?? r.category_id ?? "",
-  image: r.image ?? "", available: Boolean(r.available), featured: Boolean(r.featured),
+  image: normalizeImage(r.image), available: Boolean(r.available), featured: Boolean(r.featured),
   bestseller: Boolean(r.bestseller), isNew: Boolean(r.is_new), prepTime: Number(r.prep_time ?? 0),
   calories: r.calories == null ? null : Number(r.calories), createdAt: r.created_at ?? new Date().toISOString(),
 });
 const categoryFromRow = (r: any): Category => ({
   id: r.id, name: r.name, nameAr: r.name_ar ?? "", count: Number(r.count ?? 0),
-  image: r.image ?? "", enabled: Boolean(r.enabled), order: Number(r.sort_order ?? 0),
+  image: normalizeImage(r.image), enabled: Boolean(r.enabled), order: Number(r.sort_order ?? 0),
 });
 const offerFromRow = (r: any): Offer => r.data as Offer;
 
@@ -78,8 +93,8 @@ async function jsonDelete(table: string, id: string) {
   if (error) throw error;
 }
 
-export const useGetDashboardSummary = (params: any = {}) => useQuery({
-  queryKey: getGetDashboardSummaryQueryKey(params),
+export const useGetDashboardSummary = () => useQuery({
+  queryKey: getGetDashboardSummaryQueryKey(),
   queryFn: async () => {
     const [products, orders, offers] = await Promise.all([
       fetchProducts(), jsonList("orders"), jsonList("offers"),
@@ -105,8 +120,8 @@ export const useGetDashboardSummary = (params: any = {}) => useQuery({
   }
 });
 
-export const useGetAnalytics = (params: any = {}) => useQuery({
-  queryKey: getGetAnalyticsQueryKey(params),
+export const useGetAnalytics = () => useQuery({
+  queryKey: getGetAnalyticsQueryKey(),
   queryFn: async () => {
     const orders = await jsonList("orders");
     const active = orders.filter((o:any)=>o.status!=="cancelled");
@@ -123,10 +138,29 @@ async function fetchProducts(params: any = {}) {
   if (params.categoryId) q=q.eq("category_id",params.categoryId);
   if (params.availability==="available") q=q.eq("available",true);
   if (params.availability==="unavailable") q=q.eq("available",false);
-  const { data, error } = await q; if(error) throw error;
+  const [{ data, error }, { data: categoryRows, error: categoryError }] = await Promise.all([
+    q,
+    client.from("categories").select("id,sort_order"),
+  ]);
+  if(error) throw error;
+  if(categoryError) throw categoryError;
   const rows=(data??[]).map(productFromRow);
   const search=String(params.search??"").toLowerCase();
-  return rows.filter(p=>!search || `${p.name} ${p.nameAr}`.toLowerCase().includes(search));
+  const categoryOrder = new Map((categoryRows ?? []).map((row: any) => [row.id, Number(row.sort_order ?? 999)]));
+  const itemOrder = (product: Product) => {
+    const match = product.image.match(/(?:^|\/)([^/]+?)-(\d+)(?:\.[^/]+)?$/i);
+    return { group: match?.[1] ?? product.categoryId, number: Number(match?.[2] ?? 999) };
+  };
+  return rows
+    .filter(p=>!search || `${p.name} ${p.nameAr}`.toLowerCase().includes(search))
+    .sort((a, b) => {
+      const categoryDifference = (categoryOrder.get(a.categoryId) ?? 999) - (categoryOrder.get(b.categoryId) ?? 999);
+      if (categoryDifference) return categoryDifference;
+      const aOrder = itemOrder(a); const bOrder = itemOrder(b);
+      if (aOrder.group !== bOrder.group) return aOrder.group.localeCompare(bOrder.group);
+      if (aOrder.number !== bOrder.number) return aOrder.number - bOrder.number;
+      return a.name.localeCompare(b.name);
+    });
 }
 export const useListProducts = (params: any = {}) => useQuery({
   queryKey:getListProductsQueryKey(params), queryFn:()=>fetchProducts(params)
@@ -138,8 +172,8 @@ export const useListCategories = () => useQuery({
     const {client}=await requireUser();
     const {data,error}=await client.from("categories").select("*").order("sort_order",{ascending:true});
     if(error) throw error;
-    const {data:ps,error:pError}=await client.from("products").select("category_id");
-    if(pError) throw pError;
+    const {data:ps,error:productsError}=await client.from("products").select("category_id");
+    if(productsError) throw productsError;
     return (data??[]).map(r=>({...categoryFromRow(r),count:(ps??[]).filter((p:any)=>p.category_id===r.id).length}));
   }
 });

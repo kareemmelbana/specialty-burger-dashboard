@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -21,6 +21,7 @@ import {
 } from '@/lib/api-client';
 import { Link, Route, Switch, useLocation, useParams } from 'wouter';
 
+const queryClient = new QueryClient();
 const money = (n = 0) => `SAR ${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const shortDate = (d: string) => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : '—';
 const timeAgo = (d: string) => d ? new Date(d).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '—';
@@ -113,7 +114,7 @@ function Dashboard() {
   const q = useGetDashboardSummary({ range: 'today' }); const d: any = q.data;
   if (q.isLoading) return <Loading />; if (q.isError) return <ErrorState retry={() => q.refetch()} />;
   const summary = d || {}; const revenue = summary.revenueSeries || []; const recent = summary.recentOrders || [];
-  return <div className="enter"><PageIntro eyebrow="Service board · Jeddah" title="The pulse of Specialty." subtitle="Fresh off the grill, at a glance." action={<div className="flex items-center gap-2"><Badge tone="green"><span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-[#278b68]" /> Accepting orders</Badge><Button asChild variant="outline" data-testid="button-export-dashboard"><a href="https://specialty-burger.vercel.app/" target="_blank" rel="noreferrer"><ExternalLink size={14} /> View live site</a></Button></div>} />
+  return <div className="enter"><PageIntro eyebrow="Service board · Jeddah" title="The pulse of Specialty." subtitle="Fresh off the grill, at a glance." action={<div className="flex items-center gap-2"><Badge tone="green"><span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-[#278b68]" /> Accepting orders</Badge><a href="https://specialty-burger.vercel.app/" target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-card px-3.5 py-2.5 text-xs font-bold hover:border-primary hover:bg-primary/5" data-testid="button-export-dashboard"><ExternalLink size={14} /> View live site</a></div>} />
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <Metric label="Today’s revenue" value={money(summary.todayRevenue)} delta={`${summary.revenueChange || 12.8}%`} icon={Wallet} tone="primary" />
       <Metric label="Orders today" value={String(summary.todayOrders || 0)} delta={`${summary.ordersChange || 8.4}%`} icon={ShoppingBag} tone="mint" />
@@ -213,49 +214,8 @@ function Login(){
   };
   return <div className="grain flex min-h-[100dvh] items-center justify-center bg-sidebar p-4" dir="rtl"><div className="grid w-full max-w-5xl overflow-hidden rounded-[28px] border border-sidebar-border bg-card shadow-2xl lg:grid-cols-[.9fr_1.1fr]"><div className="relative hidden min-h-[620px] overflow-hidden bg-foreground p-10 text-background lg:flex lg:flex-col lg:justify-between"><div className="absolute -bottom-24 -left-16 h-72 w-72 rounded-full bg-primary/25 blur-2xl"/><div><Logo compact/><p className="mt-8 max-w-xs font-display text-4xl font-bold leading-tight">The grill is yours to run.</p><p className="mt-4 max-w-xs text-sm leading-6 text-background/55">One calm operating system for every ticket, table and flame in Jeddah.</p></div><div className="relative"><div className="mb-3 h-1 w-16 bg-primary"/><p className="text-xs text-background/55">“Fast hands. Fresh fire. Same standard.”</p></div></div><div className="p-7 sm:p-12"><div className="mb-10 lg:hidden"><Logo/></div><p className="text-[10px] font-bold uppercase tracking-[.2em] text-primary">Owner access · دخول المالك</p><h1 className="mt-3 font-display text-3xl font-bold">Welcome back.</h1><p className="mt-2 text-sm text-muted-foreground">Sign in with your Supabase owner account.</p><form onSubmit={login} className="mt-8 space-y-4"><label className="block text-xs font-bold">Email<input name="email" autoComplete="email" className="mt-1.5 h-12 w-full rounded-xl border border-border bg-background px-4 text-sm outline-none focus:border-primary" data-testid="input-login-email"/></label><label className="block text-xs font-bold">Password<input name="password" autoComplete="current-password" type="password" className="mt-1.5 h-12 w-full rounded-xl border border-border bg-background px-4 text-sm outline-none focus:border-primary" data-testid="input-login-password"/></label>{error&&<div className="rounded-xl bg-destructive/10 p-3 text-xs text-destructive">{error}</div>}<Button type="submit" className="mt-3 h-12 w-full text-foreground" disabled={loading}>{loading?'Signing in…':'Enter the control room'}<ArrowUpRight size={16}/></Button></form><div className="mt-8 rounded-2xl bg-secondary/50 p-4 text-xs text-secondary-foreground"><b>Secure owner access.</b><p className="mt-1 opacity-75">Create the owner account in Supabase Authentication.</p></div></div></div></div>
 }
-function AuthGate({ children }: { children: React.ReactNode }) {
-  const [, setLocation] = useLocation();
-  const [ready, setReady] = useState(false);
-  useEffect(() => {
-    let active = true;
-    if (!supabase) {
-      setLocation('/login');
-      return;
-    }
-    supabase.auth.getUser().then(({ data }) => {
-      if (!active) return;
-      if (!data.user) setLocation('/login');
-      else setReady(true);
-    }).catch(() => setLocation('/login'));
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!session) setLocation('/login');
-      else if (active) setReady(true);
-    });
-    return () => { active = false; listener.subscription.unsubscribe(); };
-  }, [setLocation]);
-  if (!ready) return <Loading label="Checking owner access" />;
-  return <>{children}</>;
-}
-function ProtectedShell({ children }: { children: React.ReactNode }) {
-  return <AuthGate><Shell>{children}</Shell></AuthGate>;
-}
-function NotFound(){return <div className="grid min-h-[100dvh] place-items-center bg-background p-6" dir="rtl"><div className="text-center"><div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-primary/15 text-primary"><Package size={24}/></div><h2 className="font-display text-2xl font-bold">الصفحة غير موجودة</h2><p className="mt-2 text-sm text-muted-foreground">The page you requested does not exist.</p><Link href="/dashboard" className="mt-5 inline-flex rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground">Back to dashboard</Link></div></div>;}
-function Router(){return <Switch>
-  <Route path="/login" component={Login}/>
-  <Route path="/"><RouteRedirect/></Route>
-  <Route path="/dashboard"><ProtectedShell><Dashboard/></ProtectedShell></Route>
-  <Route path="/menu/categories"><ProtectedShell><MenuPage categoriesOnly/></ProtectedShell></Route>
-  <Route path="/menu"><ProtectedShell><MenuPage/></ProtectedShell></Route>
-  <Route path="/orders"><ProtectedShell><OrdersPage/></ProtectedShell></Route>
-  <Route path="/customers"><ProtectedShell><CustomersPage/></ProtectedShell></Route>
-  <Route path="/offers"><ProtectedShell><OffersPage/></ProtectedShell></Route>
-  <Route path="/content"><ProtectedShell><ContentPage/></ProtectedShell></Route>
-  <Route path="/settings"><ProtectedShell><SettingsPage/></ProtectedShell></Route>
-  <Route path="/analytics"><ProtectedShell><AnalyticsPage/></ProtectedShell></Route>
-  <Route path="/reviews"><ProtectedShell><ReviewsPage/></ProtectedShell></Route>
-  <Route path="/notifications"><ProtectedShell><NotificationsPage/></ProtectedShell></Route>
-  <Route component={NotFound}/>
-</Switch>}
-function RouteRedirect(){const [,setLocation]=useLocation();useEffect(()=>{let active=true;(async()=>{if(!supabase){if(active)setLocation('/login');return;}const {data}=await supabase.auth.getUser();if(active)setLocation(data.user?'/dashboard':'/login')})().catch(()=>active&&setLocation('/login'));return()=>{active=false}},[setLocation]);return <div className="grid min-h-[100dvh] place-items-center bg-background"><Loading label="Opening the control room" /></div>}
-function App(){return <TooltipProvider><Router/><Toaster/></TooltipProvider>}
+function NotFound(){return <div className="grid min-h-[100dvh] place-items-center bg-background p-6 text-center"><div><p className="text-[10px] font-bold uppercase tracking-[.2em] text-primary">404</p><h1 className="mt-2 font-display text-3xl font-bold">Page not found</h1><p className="mt-2 text-sm text-muted-foreground">The page you requested does not exist.</p><Link href="/dashboard" className="mt-5 inline-flex rounded-xl bg-primary px-4 py-2.5 text-xs font-bold text-primary-foreground">Back to dashboard</Link></div></div>}
+function Router(){return <Switch><Route path="/login" component={Login}/><Route path="/"><RouteRedirect/></Route><Route path="/dashboard"><Shell><Dashboard/></Shell></Route><Route path="/menu/categories"><Shell><MenuPage categoriesOnly/></Shell></Route><Route path="/menu"><Shell><MenuPage/></Shell></Route><Route path="/orders"><Shell><OrdersPage/></Shell></Route><Route path="/customers"><Shell><CustomersPage/></Shell></Route><Route path="/offers"><Shell><OffersPage/></Shell></Route><Route path="/content"><Shell><ContentPage/></Shell></Route><Route path="/settings"><Shell><SettingsPage/></Shell></Route><Route path="/analytics"><Shell><AnalyticsPage/></Shell></Route><Route path="/reviews"><Shell><ReviewsPage/></Shell></Route><Route path="/notifications"><Shell><NotificationsPage/></Shell></Route><Route component={NotFound}/></Switch>}
+function RouteRedirect(){const [,setLocation]=useLocation();useEffect(()=>{(async()=>{if(!supabase){setLocation('/login');return;}const {data}=await supabase.auth.getUser();setLocation(data.user?'/dashboard':'/login')})()},[setLocation]);return <div className="min-h-[100dvh] bg-background"/>}
+function App(){return <QueryClientProvider client={queryClient}><TooltipProvider><Router/><Toaster/></TooltipProvider></QueryClientProvider>}
 export default App;
