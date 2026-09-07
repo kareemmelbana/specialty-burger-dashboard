@@ -1,9 +1,17 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createClient } from "@supabase/supabase-js";
-import {
-  categoriesBySales, dashboardSeries,
-  type Category, type Offer, type Product,
-} from "./demo-data";
+
+export type Product = {
+  id: string; name: string; nameAr: string; description: string; price: number;
+  discountPrice: number | null; categoryId: string; category: string; image: string;
+  available: boolean; featured: boolean; bestseller: boolean; isNew: boolean;
+  prepTime: number; calories: number | null; createdAt: string;
+};
+export type Category = { id: string; name: string; nameAr: string; count: number; image: string; enabled: boolean; order: number };
+export type Offer = { id: string; name: string; description: string; type: string; value: number; code: string | null; startDate: string; endDate: string; status: string; uses: number; maxUses: number; target: string };
+type OrderItem = { id?: string; productId?: string; name?: string; quantity?: number; price?: number };
+type OrderRecord = { id: string; number?: string; customer?: string; customerId?: string; items?: OrderItem[]; total?: number; createdAt: string; status?: string; [key: string]: unknown };
+type JsonRow = { id: string; data: Record<string, unknown> | null; created_at: string };
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
@@ -24,6 +32,43 @@ async function requireUser() {
 const key = (name: string, params?: unknown) =>
   params && Object.keys(params as object).length ? [name, params] : [name];
 
+export const PRODUCT_IMAGE_BUCKET = "product-images";
+
+export async function uploadProductImage(file: File) {
+  const { client } = await requireUser();
+  const extension = file.name.split(".").pop()?.toLowerCase() || "jpg";
+  const path = `${crypto.randomUUID()}.${extension}`;
+  const { error } = await client.storage.from(PRODUCT_IMAGE_BUCKET).upload(path, file, {
+    cacheControl: "3600",
+    contentType: file.type,
+    upsert: false,
+  });
+  if (error) throw error;
+  const { data } = client.storage.from(PRODUCT_IMAGE_BUCKET).getPublicUrl(path);
+  return { path, url: data.publicUrl };
+}
+
+export function getProductImagePath(value: unknown) {
+  const image = String(value ?? "").trim();
+  if (!image) return null;
+  try {
+    const url = new URL(image, window.location.origin);
+    const marker = `/storage/v1/object/public/${PRODUCT_IMAGE_BUCKET}/`;
+    const markerIndex = url.pathname.indexOf(marker);
+    return markerIndex >= 0 ? decodeURIComponent(url.pathname.slice(markerIndex + marker.length)) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteProductImage(value: unknown) {
+  const path = getProductImagePath(value);
+  if (!path) return;
+  const { client } = await requireUser();
+  const { error } = await client.storage.from(PRODUCT_IMAGE_BUCKET).remove([path]);
+  if (error) throw error;
+}
+
 export const getGetDashboardSummaryQueryKey = (params?: unknown) => key("dashboard-summary", params);
 export const getGetAnalyticsQueryKey = (params?: unknown) => key("analytics", params);
 export const getListProductsQueryKey = (params?: unknown) => key("products", params);
@@ -35,6 +80,10 @@ export const getGetWebsiteContentQueryKey = () => ["website-content"];
 export const getGetRestaurantSettingsQueryKey = () => ["restaurant-settings"];
 export const getListReviewsQueryKey = () => ["reviews"];
 export const getListNotificationsQueryKey = () => ["notifications"];
+const invalidateLiveStats = (queryClient: ReturnType<typeof useQueryClient>) => {
+  queryClient.invalidateQueries({ queryKey: getGetDashboardSummaryQueryKey() });
+  queryClient.invalidateQueries({ queryKey: getGetAnalyticsQueryKey() });
+};
 
 
 const normalizeImage = (value: unknown): string => {
@@ -65,11 +114,15 @@ const categoryFromRow = (r: any): Category => ({
 });
 const offerFromRow = (r: any): Offer => r.data as Offer;
 
-async function jsonList(table: string) {
+async function jsonRows(table: string): Promise<JsonRow[]> {
   const { client } = await requireUser();
-  const { data, error } = await client.from(table).select("data");
+  const { data, error } = await client.from(table).select("id,data,created_at");
   if (error) throw error;
-  return (data ?? []).map((x: any) => x.data);
+  return (data ?? []) as JsonRow[];
+}
+async function jsonList(table: string) {
+  const rows = await jsonRows(table);
+  return rows.map((row) => ({ ...(row.data ?? {}), id: row.data?.id ?? row.id, createdAt: row.data?.createdAt ?? row.data?.created_at ?? row.created_at }));
 }
 async function jsonUpdate(table: string, id: string, patch: any) {
   const { client } = await requireUser();
@@ -93,43 +146,50 @@ async function jsonDelete(table: string, id: string) {
   if (error) throw error;
 }
 
-export const useGetDashboardSummary = () => useQuery({
-  queryKey: getGetDashboardSummaryQueryKey(),
-  queryFn: async () => {
-    const [products, orders, offers] = await Promise.all([
-      fetchProducts(), jsonList("orders"), jsonList("offers"),
-    ]);
-    const active = orders.filter((o: any) => o.status !== "cancelled");
-    const revenue = active.reduce((s: number, o: any) => s + Number(o.total || 0), 0);
-    return {
-      todayRevenue: active.filter((o:any)=>String(o.createdAt ?? "").startsWith(new Date().toISOString().slice(0,10)))
-        .reduce((s:number,o:any)=>s+Number(o.total||0),0),
-      revenueChange: 0,
-      todayOrders: orders.filter((o:any)=>String(o.createdAt ?? "").startsWith(new Date().toISOString().slice(0,10))).length,
-      ordersChange: 0,
-      customers: (await jsonList("customers")).length,
-      averageOrder: Math.round((revenue / Math.max(active.length,1))*10)/10,
-      menuItems: products.length,
-      activeOffers: offers.filter((o:any)=>o.status==="active").length,
-      revenueSeries: dashboardSeries,
-      statusBreakdown: ["completed","preparing","new","ready"].map(label=>({label:titleize(label),value:orders.filter((o:any)=>o.status===label).length})),
-      categorySales: categoriesBySales,
-      topProducts: products.slice(0,4).map(p=>({name:p.name,category:p.category,units:0,revenue:0,image:p.image})),
-      recentOrders: orders.slice(0,5),
-    };
-  }
-});
+const localDayKey = (date: Date) => {
+  const year = date.getFullYear(); const month = String(date.getMonth() + 1).padStart(2, "0"); const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+const orderDate = (order: OrderRecord) => new Date(order.createdAt);
+const isCancelled = (order: OrderRecord) => String(order.status ?? "").toLowerCase() === "cancelled";
+const orderValue = (order: OrderRecord) => Number(order.total ?? 0);
+const rangeStart = (range: string) => { const date = new Date(); date.setHours(0, 0, 0, 0); if (range === "today") return date; if (range === "30d") date.setDate(date.getDate() - 29); else if (range === "month") date.setDate(1); else date.setDate(date.getDate() - 6); return date; };
+const daysBetween = (start: Date, count: number) => Array.from({ length: count }, (_, index) => { const day = new Date(start); day.setDate(start.getDate() + index); return day; });
 
-export const useGetAnalytics = () => useQuery({
-  queryKey: getGetAnalyticsQueryKey(),
-  queryFn: async () => {
-    const orders = await jsonList("orders");
-    const active = orders.filter((o:any)=>o.status!=="cancelled");
-    const revenue = active.reduce((s:number,o:any)=>s+Number(o.total||0),0);
-    return { revenue, orders: orders.length, averageOrder: Math.round(revenue/Math.max(active.length,1)*10)/10,
-      customerGrowth:0, peakHour:"—", newCustomers:0, returningCustomers:0, salesSeries:dashboardSeries,
-      topProducts:[], categories:categoriesBySales };
+function buildSalesData(orders: OrderRecord[], start: Date, count: number) {
+  return daysBetween(start, count).map((day) => { const key = localDayKey(day); const value = orders.filter((order) => !isCancelled(order) && localDayKey(orderDate(order)) === key).reduce((sum, order) => sum + orderValue(order), 0); return { label: day.toLocaleDateString("en-GB", { day: "numeric", month: "short" }), value }; });
+}
+
+function buildProductSales(orders: OrderRecord[], products: Product[]) {
+  const productMap = new Map(products.map((product) => [product.id, product]));
+  const sales = new Map<string, { name: string; category: string; units: number; revenue: number; image: string }>();
+  for (const order of orders) for (const item of order.items ?? []) {
+    const productId = item.productId ?? item.id; const product = productId ? productMap.get(productId) : undefined;
+    if (!product) continue;
+    const units = Number(item.quantity ?? 0); const revenue = units * Number(item.price ?? product.price ?? 0); const current = sales.get(product.id) ?? { name: product.name, category: product.category, units: 0, revenue: 0, image: product.image };
+    current.units += units; current.revenue += revenue; sales.set(product.id, current);
   }
+  return [...sales.values()].sort((a, b) => b.revenue - a.revenue);
+}
+
+function buildCategorySales(orders: OrderRecord[], products: Product[]) {
+  const productMap = new Map(products.map((product) => [product.id, product])); const sales = new Map<string, number>();
+  for (const order of orders) for (const item of order.items ?? []) { const product = productMap.get(item.productId ?? item.id ?? ""); if (!product) continue; sales.set(product.category, (sales.get(product.category) ?? 0) + Number(item.quantity ?? 0) * Number(item.price ?? product.price ?? 0)); }
+  return [...sales.entries()].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+}
+
+async function fetchDashboardData() {
+  const [products, orderRows, offers, customers] = await Promise.all([fetchProducts(), jsonList("orders"), jsonList("offers"), jsonList("customers")]);
+  const orders = orderRows as OrderRecord[]; const active = orders.filter((order) => !isCancelled(order)); const today = localDayKey(new Date()); const todayOrders = orders.filter((order) => localDayKey(orderDate(order)) === today); const todayRevenue = todayOrders.filter((order) => !isCancelled(order)).reduce((sum, order) => sum + orderValue(order), 0); const previousDay = new Date(); previousDay.setDate(previousDay.getDate() - 1); const previousRevenue = active.filter((order) => localDayKey(orderDate(order)) === localDayKey(previousDay)).reduce((sum, order) => sum + orderValue(order), 0);
+  const kitchenStatuses = ["confirmed", "preparing", "ready"]; const kitchenOrders = orders.filter((order) => kitchenStatuses.includes(String(order.status ?? ""))).length; const lastOrder = [...orders].sort((a, b) => orderDate(b).getTime() - orderDate(a).getTime())[0]; const productSales = buildProductSales(active, products);
+  return { todayRevenue, revenueChange: previousRevenue > 0 ? ((todayRevenue - previousRevenue) / previousRevenue) * 100 : null, todayOrders: todayOrders.length, customers: customers.length, averageOrder: active.length ? active.reduce((sum, order) => sum + orderValue(order), 0) / active.length : 0, menuItems: products.length, activeOffers: offers.filter((offer: any) => offer.status === "active").length, revenueSeries: buildSalesData(orders, rangeStart("7d"), 7), kitchenOrders, whatsappStatus: "WhatsApp status unavailable", lastOrderAt: lastOrder?.createdAt ?? null, statusBreakdown: [...new Set(orders.map((order) => String(order.status ?? "").toLowerCase()).filter(Boolean))].map((status) => ({ label: titleize(status), value: orders.filter((order) => order.status === status).length })), categorySales: buildCategorySales(active, products), topProducts: productSales.slice(0, 5), recentOrders: orders.sort((a, b) => orderDate(b).getTime() - orderDate(a).getTime()).slice(0, 5) };
+}
+
+export const useGetDashboardSummary = (params: unknown = {}) => useQuery({ queryKey: getGetDashboardSummaryQueryKey(params), queryFn: fetchDashboardData, refetchInterval: 30000 });
+
+export const useGetAnalytics = (params: { range?: string } = {}) => useQuery({
+  queryKey: getGetAnalyticsQueryKey(params), refetchInterval: 30000,
+  queryFn: async () => { const [products, orderRows, customers] = await Promise.all([fetchProducts(), jsonList("orders"), jsonList("customers")]); const orders = orderRows as OrderRecord[]; const start = rangeStart(params.range ?? "7d"); const count = params.range === "today" ? 1 : params.range === "30d" || params.range === "month" ? 30 : 7; const filtered = orders.filter((order) => orderDate(order) >= start); const active = filtered.filter((order) => !isCancelled(order)); const productSales = buildProductSales(active, products); const customerIds = new Set(active.map((order) => order.customerId).filter(Boolean)); const customerOrderCounts = new Map<string, number>(); for (const order of active) if (order.customerId) customerOrderCounts.set(order.customerId, (customerOrderCounts.get(order.customerId) ?? 0) + 1); const returningCustomers = [...customerOrderCounts.values()].filter((count) => count > 1).length; const newCustomers = customers.filter((customer: any) => customer.registeredAt && new Date(customer.registeredAt) >= start).length; const peakHours = new Map<number, number>(); for (const order of active) { const hour = orderDate(order).getHours(); peakHours.set(hour, (peakHours.get(hour) ?? 0) + 1); } const peak = [...peakHours.entries()].sort((a, b) => b[1] - a[1])[0]; return { revenue: active.reduce((sum, order) => sum + orderValue(order), 0), orders: filtered.length, averageOrder: active.length ? active.reduce((sum, order) => sum + orderValue(order), 0) / active.length : 0, customerGrowth: null, peakHour: peak ? `${String(peak[0]).padStart(2, "0")}:00` : "—", newCustomers: customers.some((customer: any) => customer.registeredAt) ? newCustomers : null, returningCustomers: customerIds.size ? returningCustomers : null, salesSeries: buildSalesData(orders, start, count), topProducts: productSales, categories: buildCategorySales(active, products), customerCount: customers.length }; }
 });
 
 async function fetchProducts(params: any = {}) {
@@ -140,11 +200,19 @@ async function fetchProducts(params: any = {}) {
   if (params.availability==="unavailable") q=q.eq("available",false);
   const [{ data, error }, { data: categoryRows, error: categoryError }] = await Promise.all([
     q,
-    client.from("categories").select("id,sort_order"),
+    client.from("categories").select("id,name,name_ar,sort_order"),
   ]);
   if(error) throw error;
   if(categoryError) throw categoryError;
-  const rows=(data??[]).map(productFromRow);
+  const categoryMap = new Map((categoryRows ?? []).map((row: any) => [row.id, row]));
+  const rows=(data??[]).map((r: any) => {
+    const category = categoryMap.get(r.category_id);
+    return productFromRow({
+      ...r,
+      category_name: category?.name ?? r.category_name,
+      category_name_ar: category?.name_ar ?? r.category_name_ar,
+    });
+  });
   const search=String(params.search??"").toLowerCase();
   const categoryOrder = new Map((categoryRows ?? []).map((row: any) => [row.id, Number(row.sort_order ?? 999)]));
   const itemOrder = (product: Product) => {
@@ -192,7 +260,7 @@ export const useListNotifications=()=>useQuery({queryKey:getListNotificationsQue
 export const useGetWebsiteContent=()=>useQuery({queryKey:getGetWebsiteContentQueryKey(),queryFn:async()=>{const rows=await jsonList("website_content");return rows[0]??{};}});
 export const useGetRestaurantSettings=()=>useQuery({queryKey:getGetRestaurantSettingsQueryKey(),queryFn:async()=>{const rows=await jsonList("restaurant_settings");return rows[0]??{};}});
 
-export const useCreateProduct=()=>useMutation({mutationFn:async({data}:any)=>{
+export const useCreateProduct=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:async({data}:any)=>{
   const {client}=await requireUser();
   const {data:row,error}=await client.from("products").insert({
     id:`p-${crypto.randomUUID().slice(0,8)}`,name:data.name,name_ar:data.nameAr,description:data.description??"",
@@ -200,8 +268,8 @@ export const useCreateProduct=()=>useMutation({mutationFn:async({data}:any)=>{
     image:data.image||"",available:data.available??true,featured:data.featured??false,bestseller:data.bestseller??false,
     is_new:data.isNew??true,prep_time:Number(data.prepTime)||0,calories:data.calories==null?null:Number(data.calories)
   }).select("*").single(); if(error)throw error; return productFromRow(row);
-}});
-export const useUpdateProduct=()=>useMutation({mutationFn:async({id,data}:any)=>{
+},onSuccess:()=>invalidateLiveStats(queryClient)});};
+export const useUpdateProduct=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:async({id,data}:any)=>{
   const {client}=await requireUser();
   const patch:any={}; if("name"in data)patch.name=data.name;if("nameAr"in data)patch.name_ar=data.nameAr;
   if("description"in data)patch.description=data.description;if("price"in data)patch.price=Number(data.price)||0;
@@ -210,12 +278,12 @@ export const useUpdateProduct=()=>useMutation({mutationFn:async({id,data}:any)=>
   for(const [a,b] of [["available","available"],["featured","featured"],["bestseller","bestseller"],["isNew","is_new"]])if(a in data)patch[b]=Boolean(data[a]);
   if("prepTime"in data)patch.prep_time=Number(data.prepTime)||0;if("calories"in data)patch.calories=data.calories==null?null:Number(data.calories);
   const {data:row,error}=await client.from("products").update(patch).eq("id",id).select("*").single();if(error)throw error;return productFromRow(row);
-}});
-export const useDeleteProduct=()=>useMutation({mutationFn:async({id}:any)=>{const {client}=await requireUser();const {error}=await client.from("products").delete().eq("id",id);if(error)throw error;}});
-export const useDuplicateProduct=()=>useMutation({mutationFn:async({id}:any)=>{
+},onSuccess:()=>invalidateLiveStats(queryClient)});};
+export const useDeleteProduct=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:async({id}:any)=>{const {client}=await requireUser();const {data:row,error:readError}=await client.from("products").select("image").eq("id",id).single();if(readError)throw readError;const {error}=await client.from("products").delete().eq("id",id);if(error)throw error;await deleteProductImage(row?.image);},onSuccess:()=>invalidateLiveStats(queryClient)});};
+export const useDuplicateProduct=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:async({id}:any)=>{
   const {client}=await requireUser(); const {data:r,error}=await client.from("products").select("*").eq("id",id).single();if(error)throw error;
   const p=productFromRow(r); const {data:row,error:e}=await client.from("products").insert({...r,id:`p-${crypto.randomUUID().slice(0,8)}`,name:`${p.name} · Copy`,name_ar:`${p.nameAr} · نسخة`,is_new:true}).select("*").single();if(e)throw e;return productFromRow(row);
-}});
+},onSuccess:()=>invalidateLiveStats(queryClient)});};
 export const useCreateCategory=()=>useMutation({mutationFn:async({data}:any)=>{
   const {client}=await requireUser(); const id=`cat-${crypto.randomUUID().slice(0,8)}`;
   const {data:row,error}=await client.from("categories").insert({id,name:data.name,name_ar:data.nameAr??"",image:data.image||"",enabled:data.enabled??true,sort_order:Number(data.order)||1}).select("*").single();
@@ -228,10 +296,10 @@ export const useUpdateCategory=()=>useMutation({mutationFn:async({id,data}:any)=
 }});
 export const useDeleteCategory=()=>useMutation({mutationFn:async({id}:any)=>{const {client}=await requireUser();const {error}=await client.from("categories").delete().eq("id",id);if(error)throw error;}});
 
-export const useUpdateOrder=()=>useMutation({mutationFn:({id,data}:any)=>jsonUpdate("orders",id,data)});
-export const useCreateOffer=()=>useMutation({mutationFn:({data}:any)=>jsonInsert("offers",{...data,id:`offer-${crypto.randomUUID().slice(0,8)}`})});
-export const useUpdateOffer=()=>useMutation({mutationFn:({id,data}:any)=>jsonUpdate("offers",id,data)});
-export const useDeleteOffer=()=>useMutation({mutationFn:({id}:any)=>jsonDelete("offers",id)});
+export const useUpdateOrder=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({id,data}:any)=>jsonUpdate("orders",id,data),onSuccess:()=>invalidateLiveStats(queryClient)});};
+export const useCreateOffer=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({data}:any)=>jsonInsert("offers",{...data,id:`offer-${crypto.randomUUID().slice(0,8)}`}),onSuccess:()=>invalidateLiveStats(queryClient)});};
+export const useUpdateOffer=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({id,data}:any)=>jsonUpdate("offers",id,data),onSuccess:()=>invalidateLiveStats(queryClient)});};
+export const useDeleteOffer=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({id}:any)=>jsonDelete("offers",id),onSuccess:()=>invalidateLiveStats(queryClient)});};
 export const useUpdateWebsiteContent=()=>useMutation({mutationFn:async({data}:any)=>{const {client}=await requireUser();const {data:r,error}=await client.from("website_content").select("id").limit(1).single();if(error)throw error;return jsonUpdate("website_content",r.id,data);}});
 export const useUpdateRestaurantSettings=()=>useMutation({mutationFn:async({data}:any)=>{const {client}=await requireUser();const {data:r,error}=await client.from("restaurant_settings").select("id").limit(1).single();if(error)throw error;return jsonUpdate("restaurant_settings",r.id,data);}});
 export const useUpdateReview=()=>useMutation({mutationFn:({id,data}:any)=>jsonUpdate("reviews",id,data)});

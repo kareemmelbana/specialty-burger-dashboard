@@ -61,10 +61,25 @@ create policy "public read restaurant settings" on public.restaurant_settings fo
 drop policy if exists "admins all restaurant_settings" on public.restaurant_settings;
 create policy "admins all restaurant_settings" on public.restaurant_settings for all using (public.is_admin()) with check (public.is_admin());
 
+-- Product uploads are public-read but remain writable only by dashboard admins.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('product-images', 'product-images', true, 5242880, '{image/jpeg,image/png,image/webp}')
+on conflict (id) do update set public=true, file_size_limit=5242880, allowed_mime_types='{image/jpeg,image/png,image/webp}';
+
+drop policy if exists "public read product images" on storage.objects;
+create policy "public read product images" on storage.objects for select using (bucket_id='product-images');
+drop policy if exists "admins upload product images" on storage.objects;
+create policy "admins upload product images" on storage.objects for insert with check (bucket_id='product-images' and public.is_admin());
+drop policy if exists "admins update product images" on storage.objects;
+create policy "admins update product images" on storage.objects for update using (bucket_id='product-images' and public.is_admin()) with check (bucket_id='product-images' and public.is_admin());
+drop policy if exists "admins delete product images" on storage.objects;
+create policy "admins delete product images" on storage.objects for delete using (bucket_id='product-images' and public.is_admin());
+
 -- Remove the earlier 9-item seed IDs so the final menu has exactly 35 products.
 delete from public.products where id in ('p-original','p-pomegranate','p-caramel','p-fried-chicken','p-fries','p-wings','p-broast','p-strips-meal','p-coke');
 
 -- Categories
+delete from public.categories where lower(name) = 'crepe';
 insert into public.categories(id,name,name_ar,image,enabled,sort_order) values ('appetizers','Appetizers','المقبلات','/menu/extra-4.jpg',true,1) on conflict(id) do update set name=excluded.name,name_ar=excluded.name_ar,image=excluded.image,enabled=excluded.enabled,sort_order=excluded.sort_order;
 insert into public.categories(id,name,name_ar,image,enabled,sort_order) values ('burgers','Burgers','البرجر','/menu/burger-1.jpg',true,2) on conflict(id) do update set name=excluded.name,name_ar=excluded.name_ar,image=excluded.image,enabled=excluded.enabled,sort_order=excluded.sort_order;
 insert into public.categories(id,name,name_ar,image,enabled,sort_order) values ('broast','Broast','بروست','/menu/meal-3.jpg',true,3) on conflict(id) do update set name=excluded.name,name_ar=excluded.name_ar,image=excluded.image,enabled=excluded.enabled,sort_order=excluded.sort_order;
