@@ -16,7 +16,6 @@ import {
   ChevronDown,
   ChevronUp,
   Clock3,
-  Copy,
   Edit3,
   ExternalLink,
   Eye,
@@ -65,7 +64,6 @@ import {
   useDeleteCategory,
   useDeleteProduct,
   useDeleteOffer,
-  useDuplicateProduct,
   useGetAnalytics,
   useGetDashboardSummary,
   useGetRestaurantSettings,
@@ -837,10 +835,12 @@ function ProductModal({
   product,
   categories,
   close,
+  onSaved,
 }: {
   product?: any;
   categories: any[];
   close: () => void;
+  onSaved?: (message: string) => void;
 }) {
   const create = useCreateProduct();
   const update = useUpdateProduct();
@@ -920,6 +920,7 @@ function ProductModal({
       if (product && product.image !== saved.image)
         await deleteProductImage(product.image).catch(() => {});
       qc.invalidateQueries({ queryKey: getListProductsQueryKey() });
+      onSaved?.(product ? "Product updated" : "Product created");
       close();
     } catch (error: any) {
       if (uploaded && !databaseSaved) await deleteProductImage(uploaded.url).catch(() => {});
@@ -1097,13 +1098,15 @@ function ProductModal({
 function MenuPage({ categoriesOnly = false }: { categoriesOnly?: boolean }) {
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState<any>(null);
+  const [deleteTarget, setDeleteTarget] = useState<any>(null);
+  const [actionMessage, setActionMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [pendingProductId, setPendingProductId] = useState<string | null>(null);
   const [filter, setFilter] = useState("all");
   const pq = useListProducts({ search: search || undefined, availability: filter as any });
   const cq = useListCategories();
   const products: any[] = pq.data || [];
   const categories: any[] = cq.data || [];
   const update = useUpdateProduct();
-  const duplicate = useDuplicateProduct();
   const del = useDeleteProduct();
   const createCat = useCreateCategory();
   const updateCat = useUpdateCategory();
@@ -1130,17 +1133,40 @@ function MenuPage({ categoriesOnly = false }: { categoriesOnly?: boolean }) {
         qc={qc}
       />
     );
-  const toggle = (p: any) =>
+  const toggle = (p: any) => {
+    setActionMessage(null);
+    setPendingProductId(p.id);
     update.mutate(
-      { id: p.id, data: { ...p, available: !p.available } },
-      { onSuccess: () => qc.invalidateQueries({ queryKey: getListProductsQueryKey() }) },
+      { id: p.id, data: { available: !p.available } },
+      {
+        onSuccess: () => {
+          qc.invalidateQueries({ queryKey: getListProductsQueryKey() });
+          setActionMessage({ type: "success", text: p.available ? "Product hidden" : "Product is now visible" });
+        },
+        onError: (error: any) => setActionMessage({ type: "error", text: error?.message || "Could not update product availability." }),
+        onSettled: () => setPendingProductId(null),
+      },
     );
+  };
   const remove = (p: any) => {
-    if (confirm(`Delete ${p.name}?`))
-      del.mutate(
-        { id: p.id },
-        { onSuccess: () => qc.invalidateQueries({ queryKey: getListProductsQueryKey() }) },
-      );
+    setDeleteTarget(p);
+    setActionMessage(null);
+  };
+  const confirmDelete = () => {
+    if (!deleteTarget) return;
+    setPendingProductId(deleteTarget.id);
+    del.mutate(
+      { id: deleteTarget.id },
+      {
+        onSuccess: () => {
+          qc.invalidateQueries({ queryKey: getListProductsQueryKey() });
+          setDeleteTarget(null);
+          setActionMessage({ type: "success", text: "Product deleted" });
+        },
+        onError: (error: any) => setActionMessage({ type: "error", text: error?.message || "Could not delete product." }),
+        onSettled: () => setPendingProductId(null),
+      },
+    );
   };
   return (
     <div className="enter">
@@ -1154,6 +1180,11 @@ function MenuPage({ categoriesOnly = false }: { categoriesOnly?: boolean }) {
           </Button>
         }
       />
+      {actionMessage && (
+        <div className={`mb-4 rounded-xl p-3 text-xs font-semibold ${actionMessage.type === "error" ? "bg-destructive/10 text-destructive" : "bg-secondary text-secondary-foreground"}`}>
+          {actionMessage.text}
+        </div>
+      )}
       <div className="mb-5 grid gap-3 md:grid-cols-[1fr_auto]">
         <SearchBar
           value={search}
@@ -1164,7 +1195,7 @@ function MenuPage({ categoriesOnly = false }: { categoriesOnly?: boolean }) {
           {[
             ["all", "All items"],
             ["available", "Available"],
-            ["unavailable", "Paused"],
+            ["unavailable", "Unavailable"],
           ].map(([v, l]) => (
             <button
               key={v}
@@ -1201,13 +1232,6 @@ function MenuPage({ categoriesOnly = false }: { categoriesOnly?: boolean }) {
                   {p.bestseller && <Badge tone="yellow">Bestseller</Badge>}
                   {p.isNew && <Badge tone="green">New</Badge>}
                 </div>
-                <button
-                  onClick={() => toggle(p)}
-                  className={`absolute bottom-3 left-3 rounded-full px-3 py-1.5 text-[10px] font-bold shadow-sm ${p.available ? "bg-card text-foreground" : "bg-foreground text-background"}`}
-                  data-testid={`button-availability-${p.id}`}
-                >
-                  {p.available ? "Available" : "Paused"}
-                </button>
               </div>
               <div className="p-4">
                 <div className="flex justify-between gap-2">
@@ -1236,29 +1260,32 @@ function MenuPage({ categoriesOnly = false }: { categoriesOnly?: boolean }) {
                   </span>
                   <div className="flex gap-1">
                     <button
+                      type="button"
+                      onClick={() => toggle(p)}
+                      disabled={pendingProductId === p.id}
+                      title={p.available ? "Hide product" : "Show product"}
+                      aria-label={p.available ? "Hide product" : "Show product"}
+                      className="rounded-lg px-2 py-1 text-[10px] font-bold text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-wait disabled:opacity-60"
+                      data-testid={`button-availability-${p.id}`}
+                    >
+                      {pendingProductId === p.id ? "Saving…" : p.available ? "Hide" : "Show"}
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => setModal(p)}
+                      title="Edit product"
+                      aria-label="Edit product"
                       className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-foreground"
                       data-testid={`button-edit-product-${p.id}`}
                     >
                       <Pencil size={15} />
                     </button>
                     <button
-                      onClick={() =>
-                        duplicate.mutate(
-                          { id: p.id },
-                          {
-                            onSuccess: () =>
-                              qc.invalidateQueries({ queryKey: getListProductsQueryKey() }),
-                          },
-                        )
-                      }
-                      className="rounded-lg p-2 text-muted-foreground hover:bg-muted"
-                      data-testid={`button-duplicate-product-${p.id}`}
-                    >
-                      <Copy size={15} />
-                    </button>
-                    <button
+                      type="button"
                       onClick={() => remove(p)}
+                      title="Delete product"
+                      aria-label="Delete product"
+                      disabled={pendingProductId === p.id}
                       className="rounded-lg p-2 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                       data-testid={`button-delete-product-${p.id}`}
                     >
@@ -1274,7 +1301,7 @@ function MenuPage({ categoriesOnly = false }: { categoriesOnly?: boolean }) {
             <Empty
               icon={Search}
               title="Nothing on this pass"
-              body="Try another search or bring a paused item back to the board."
+              body="Try another search or bring an unavailable item back to the board."
             />
           </div>
         )}
@@ -1284,7 +1311,24 @@ function MenuPage({ categoriesOnly = false }: { categoriesOnly?: boolean }) {
           product={modal.new ? undefined : modal}
           categories={categories}
           close={() => setModal(null)}
+          onSaved={(message) => setActionMessage({ type: "success", text: message })}
         />
+      )}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-foreground/35 p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 shadow-2xl">
+            <h3 className="font-display text-xl font-bold">Delete this product?</h3>
+            <p className="mt-2 text-sm text-muted-foreground">This action cannot be undone.</p>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button variant="outline" type="button" onClick={() => setDeleteTarget(null)} disabled={del.isPending}>
+                Cancel
+              </Button>
+              <Button variant="danger" type="button" onClick={confirmDelete} disabled={del.isPending}>
+                {del.isPending ? "Deleting…" : "Delete"}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
