@@ -14,6 +14,7 @@ import {
   Box,
   Check,
   ChevronDown,
+  ChevronUp,
   Clock3,
   Copy,
   Edit3,
@@ -98,6 +99,25 @@ const shortDate = (d: string) =>
   d ? new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short" }) : "—";
 const timeAgo = (d: string) =>
   d ? new Date(d).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }) : "—";
+const orderTimeLabel = (d?: string | null) => {
+  if (!d) return "—";
+  const date = new Date(d);
+  if (Number.isNaN(date.getTime())) return "—";
+  const minutes = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const today = new Date();
+  const sameDay = date.getFullYear() === today.getFullYear() && date.getMonth() === today.getMonth() && date.getDate() === today.getDate();
+  return sameDay
+    ? `Today ${date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}`
+    : date.toLocaleDateString("en-GB", { day: "2-digit", month: "short" }) + ` ${date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+};
+const localOrderDay = (d?: string | null) => {
+  if (!d) return "";
+  const date = new Date(d);
+  return Number.isNaN(date.getTime()) ? "" : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+};
+const orderItemsCount = (items: any[] = []) => items.reduce((sum, item) => sum + Number(item.quantity ?? 1), 0);
 const titleize = (s = "") => s.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const formatCurrentDate = () =>
   new Date().toLocaleDateString("en-GB", {
@@ -1436,8 +1456,9 @@ function OrdersPage() {
   const [status, setStatus] = useState("all");
   const [date, setDate] = useState("");
   const [selected, setSelected] = useState<any>(null);
+  const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const q = useListOrders({ search: search || undefined, status: status as any, date: date || undefined });
-  const allOrdersQuery = useListOrders({ date: date || undefined });
+  const allOrdersQuery = useListOrders();
   const orders: any[] = q.data || [];
   const allOrders: any[] = allOrdersQuery.data || [];
   const update = useUpdateOrder();
@@ -1447,7 +1468,15 @@ function OrdersPage() {
     if (!client) return;
     const channel = client
       .channel("orders-page")
-      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => {
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "orders" }, () => {
+        qc.invalidateQueries({ queryKey: getListOrdersQueryKey() });
+        qc.invalidateQueries({ queryKey: getGetDashboardSummaryQueryKey() });
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "orders" }, () => {
+        qc.invalidateQueries({ queryKey: getListOrdersQueryKey() });
+        qc.invalidateQueries({ queryKey: getGetDashboardSummaryQueryKey() });
+      })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "orders" }, () => {
         qc.invalidateQueries({ queryKey: getListOrdersQueryKey() });
         qc.invalidateQueries({ queryKey: getGetDashboardSummaryQueryKey() });
       })
@@ -1465,16 +1494,12 @@ function OrdersPage() {
     "completed",
     "cancelled",
   ];
-  const next = (o: any) => {
-    const i = statuses.indexOf(o.status);
-    if (i < 0) return;
-    const n = statuses[Math.min(i + 1, 6)];
-    if (n && n !== o.status)
-      update.mutate(
-        { id: o.id, data: { status: n as any } },
-        { onSuccess: () => qc.invalidateQueries({ queryKey: getListOrdersQueryKey() }) },
-      );
-  };
+  const today = localOrderDay(new Date().toISOString());
+  const todayOrders = allOrders.filter((order) => localOrderDay(order.createdAt) === today);
+  const activeOrders = allOrders.filter((order) => !["completed", "cancelled"].includes(order.status));
+  const completedOrders = allOrders.filter((order) => order.status === "completed");
+  const cancelledOrders = allOrders.filter((order) => order.status === "cancelled");
+  const totalSales = allOrders.filter((order) => order.status !== "cancelled").reduce((sum, order) => sum + Number(order.total ?? 0), 0);
   return (
     <div className="enter">
       <PageIntro
@@ -1488,15 +1513,22 @@ function OrdersPage() {
           </div>
         }
       />
+      <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <Metric label="Orders today" value={String(todayOrders.length)} icon={ShoppingBag} tone="mint" />
+        <Metric label="Active orders" value={String(activeOrders.length)} icon={Activity} tone="primary" />
+        <Metric label="Completed" value={String(completedOrders.length)} icon={Check} tone="dark" />
+        <Metric label="Cancelled" value={String(cancelledOrders.length)} icon={X} tone="red" />
+        <Metric label="Total sales" value={money(totalSales)} icon={Wallet} tone="primary" />
+      </div>
       <div className="mb-5 space-y-3">
-        <SearchBar value={search} onChange={setSearch} />
+        <SearchBar value={search} onChange={setSearch} placeholder="Search by order number or table…" />
         <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-xs font-bold">
             <span className="text-muted-foreground">Date</span>
             <input type="date" value={date} onChange={(event) => setDate(event.target.value)} className="bg-transparent text-xs font-bold outline-none" data-testid="input-order-date" />
           </label>
         </div>
-        <div className="flex gap-2 overflow-x-auto pb-1">
+        <div className="flex flex-wrap gap-2 pb-1">
           {statuses.map((s) => (
             <button
               onClick={() => setStatus(s)}
@@ -1515,66 +1547,69 @@ function OrdersPage() {
         </div>
       </div>
       <div className="overflow-hidden rounded-2xl border border-card-border bg-card shadow-sm">
-        <div className="hidden grid-cols-[1fr_1.3fr_1fr_.8fr_.8fr_110px] gap-4 border-b border-border bg-muted/50 px-5 py-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground md:grid">
-          <span>Ticket</span>
+        <div className="hidden grid-cols-[minmax(135px,1.1fr)_minmax(90px,.8fr)_minmax(150px,1.4fr)_minmax(85px,.8fr)_minmax(90px,.8fr)_minmax(100px,.9fr)_auto] gap-4 border-b border-border bg-muted/50 px-5 py-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground md:grid">
+          <span>Order #</span>
           <span>Table</span>
           <span>Items</span>
           <span>Total</span>
           <span>Status</span>
+          <span>Time</span>
           <span />
         </div>
         {orders.length ? (
           orders.map((o: any) => (
-            <div
-              key={o.id}
-              className="grid gap-3 border-b border-border p-4 last:border-0 hover:bg-muted/40 md:grid-cols-[1fr_1.3fr_1fr_.8fr_.8fr_110px] md:items-center md:gap-4 md:px-5"
-              data-testid={`row-order-${o.id}`}
-            >
-              <div>
-                <b className="text-sm">Order #{String(o.number).replace(/^#/, "")}</b>
-                <p className="text-[11px] text-muted-foreground">
-                  {o.tableNumber != null ? `Table ${o.tableNumber} · ` : "Table — · "}{timeAgo(o.createdAt)}
+            <div key={o.id} className="border-b border-border last:border-0" data-testid={`row-order-${o.id}`}>
+              <div className="grid min-w-0 gap-3 p-4 hover:bg-muted/40 md:grid-cols-[minmax(135px,1.1fr)_minmax(90px,.8fr)_minmax(150px,1.4fr)_minmax(85px,.8fr)_minmax(90px,.8fr)_minmax(100px,.9fr)_auto] md:items-center md:gap-4 md:px-5">
+                <div>
+                  <b className="text-sm">Order #{String(o.number).replace(/^#/, "")}</b>
+                </div>
+                <div>
+                  <p className="text-sm font-bold"><span className="mr-1 text-[10px] font-normal text-muted-foreground md:hidden">Table</span>{o.tableNumber ?? "—"}</p>
+                </div>
+                <p className="min-w-0 truncate text-xs text-muted-foreground">
+                  <span className="mr-1 text-[10px] font-bold text-foreground md:hidden">Items</span>
+                  {orderItemsCount(o.items)} Items
+                  {o.items?.length ? ` · ${o.items.map((i: any) => `${i.quantity}× ${i.name}`).join(", ")}` : ""}
                 </p>
-              </div>
-              <div>
-                <p className="text-sm font-bold">Table {o.tableNumber ?? "—"}</p>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {o.items?.reduce((sum: number, item: any) => sum + Number(item.quantity ?? 0), 0)} Items
-                {o.items?.length ? ` · ${o.items.map((i: any) => `${i.quantity}× ${i.name}`).join(", ")}` : ""}
-              </p>
-              <b className="text-sm">{money(o.total_amount ?? o.total)}</b>
-              <Badge
-                tone={
-                  o.status === "completed"
-                    ? "green"
-                    : o.status === "cancelled"
-                      ? "red"
-                      : o.status === "new"
-                        ? "blue"
-                        : "yellow"
-                }
-              >
-                {titleize(o.status)}
-              </Badge>
-              <div className="flex gap-1">
-                <button
-                  onClick={() => setSelected(o)}
-                  className="rounded-lg p-2 hover:bg-muted"
-                  data-testid={`button-view-order-${o.id}`}
+                <b className="text-sm"><span className="mr-1 text-[10px] font-normal text-muted-foreground md:hidden">Total</span>{money(o.total)}</b>
+                <Badge
+                  tone={
+                    o.status === "completed"
+                      ? "green"
+                      : o.status === "cancelled"
+                        ? "red"
+                        : o.status === "new"
+                          ? "blue"
+                          : "yellow"
+                  }
                 >
-                  <Eye size={15} />
-                </button>
-                {!["completed", "cancelled"].includes(o.status) && (
+                  {titleize(o.status)}
+                </Badge>
+                <p className="text-xs text-muted-foreground"><span className="mr-1 text-[10px] font-bold text-foreground md:hidden">Time</span>{orderTimeLabel(o.createdAt)}</p>
+                <div className="flex gap-1">
                   <button
-                    onClick={() => next(o)}
+                    type="button"
+                    onClick={() => setSelected(o)}
+                    title="View order details"
+                    aria-label="View order details"
+                    className="rounded-lg p-2 hover:bg-muted"
+                    data-testid={`button-view-order-${o.id}`}
+                  >
+                    <Eye size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedOrderId((current) => current === o.id ? null : o.id)}
+                    title={expandedOrderId === o.id ? "Collapse order details" : "Expand order details"}
+                    aria-label={expandedOrderId === o.id ? "Collapse order details" : "Expand order details"}
                     className="rounded-lg bg-primary/15 p-2 text-primary-foreground hover:bg-primary/30"
                     data-testid={`button-advance-order-${o.id}`}
                   >
-                    <ChevronDown size={15} />
+                    {expandedOrderId === o.id ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
                   </button>
-                )}
+                </div>
               </div>
+              {expandedOrderId === o.id && <InlineOrderDetails order={o} />}
             </div>
           ))
         ) : (
@@ -1586,21 +1621,101 @@ function OrdersPage() {
         )}
       </div>
       {selected && (
-        <OrderDetail order={selected} close={() => setSelected(null)} update={update} qc={qc} />
+        <OrderDetail
+          order={selected}
+          close={() => setSelected(null)}
+          update={update}
+          onUpdated={(nextOrder) => setSelected(nextOrder)}
+        />
       )}
     </div>
   );
 }
+
+function InlineOrderDetails({ order }: { order: any }) {
+  const items = Array.isArray(order.items) ? order.items : [];
+  return (
+    <div className="border-t border-border bg-muted/30 px-4 py-4 md:px-5">
+      <div className="grid gap-3 rounded-xl border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Order</p>
+          <p className="mt-1 text-sm font-bold">#{String(order.number ?? "").replace(/^#/, "") || "—"}</p>
+        </div>
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Table</p>
+          <p className="mt-1 text-sm font-bold">{order.tableNumber ?? "—"}</p>
+        </div>
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Status</p>
+          <div className="mt-1">
+            <Badge tone={order.status === "completed" ? "green" : order.status === "cancelled" ? "red" : order.status === "new" ? "blue" : "yellow"}>
+              {titleize(order.status)}
+            </Badge>
+          </div>
+        </div>
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Time</p>
+          <p className="mt-1 text-sm font-bold">{timeAgo(order.createdAt)}</p>
+        </div>
+      </div>
+      <div className="mt-4">
+        <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Items</h4>
+        {items.length ? (
+          <div className="mt-2 space-y-2">
+            {items.map((item: any, index: number) => {
+              const addons = Array.isArray(item.addons) ? item.addons : [];
+              return (
+                <div className="rounded-xl border border-border bg-card p-3" key={item.id ?? index}>
+                  <div className="flex min-w-0 items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="break-words text-sm font-bold">{item.name || "Unnamed item"}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {Number(item.quantity ?? 1)} × {money(item.unitPrice ?? item.price)}
+                      </p>
+                    </div>
+                    <b className="shrink-0 text-sm">{money(item.subtotal)}</b>
+                  </div>
+                  {addons.length > 0 && (
+                    <div className="mt-2 border-t border-border pt-2 text-xs text-muted-foreground">
+                      {addons.map((addon: any, addonIndex: number) => (
+                        <p className="break-words" key={addon.id ?? addonIndex}>
+                          {addon.name || "Add-on"} × {Number(addon.quantity ?? 1)} — {money(addon.price)}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">No item details available.</p>
+        )}
+      </div>
+      <div className="mt-4 ml-auto max-w-sm space-y-2 border-t border-border pt-3 text-sm">
+        <div className="flex justify-between gap-4">
+          <span>Subtotal</span>
+          <b>{money(order.subtotal)}</b>
+        </div>
+        <div className="flex justify-between gap-4 font-display text-base font-bold">
+          <span>Total</span>
+          <b>{money(order.total)}</b>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function OrderDetail({
   order,
   close,
   update,
-  qc,
+  onUpdated,
 }: {
   order: any;
   close: () => void;
   update: any;
-  qc: any;
+  onUpdated: (order: any) => void;
 }) {
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-foreground/30">
@@ -1611,6 +1726,7 @@ function OrderDetail({
               Ticket detail
             </p>
             <h3 className="font-display text-2xl font-bold">Order #{String(order.number).replace(/^#/, "")}</h3>
+            <p className="mt-1 text-xs text-muted-foreground">{orderTimeLabel(order.createdAt)}</p>
           </div>
           <button
             onClick={close}
@@ -1625,7 +1741,8 @@ function OrderDetail({
             <span className="text-xs font-bold">Current status</span>
             <select
               value={order.status}
-              onChange={(event) => update.mutate({ id: order.id, data: { status: event.target.value } }, { onSuccess: () => qc.invalidateQueries({ queryKey: getListOrdersQueryKey() }) })}
+              disabled={update.isPending}
+              onChange={(event) => update.mutate({ id: order.id, data: { status: event.target.value } }, { onSuccess: onUpdated })}
               className="rounded-lg border border-border bg-background px-2 py-1 text-xs font-bold"
               data-testid="select-order-status"
             >
@@ -1646,7 +1763,7 @@ function OrderDetail({
           {order.items?.map((it: any, index: number) => (
             <div className="border-b border-border pb-3 text-sm" key={it.id ?? index}>
               <div className="flex justify-between gap-3">
-                <span><b>{it.quantity}×</b> {it.name}</span>
+                <span className="min-w-0 break-words"><b>{it.quantity}×</b> {it.name}</span>
                 <b>{money(it.subtotal)}</b>
               </div>
               <p className="mt-1 text-[11px] text-muted-foreground">
@@ -1654,7 +1771,7 @@ function OrderDetail({
               </p>
               {it.addons?.length ? <div className="mt-2 space-y-1 pl-3 text-[11px] text-muted-foreground">
                 <p className="font-bold text-foreground">Add-ons:</p>
-                {it.addons.map((addon: any, addonIndex: number) => <p key={addon.id ?? addonIndex}>- {addon.name} × {addon.quantity ?? 1} — {money(addon.price)}</p>)}
+                {it.addons.map((addon: any, addonIndex: number) => <p className="break-words" key={addon.id ?? addonIndex}>- {addon.name} × {addon.quantity ?? 1} — {money(addon.price)}</p>)}
               </div> : null}
             </div>
           ))}
@@ -1663,27 +1780,30 @@ function OrderDetail({
             <span>{money(order.subtotal)}</span>
           </div>
           <div className="flex justify-between pt-2 font-display text-lg font-bold">
-            <span>Total</span>
+            <span>Total amount</span>
             <span>{money(order.total)}</span>
           </div>
         </div>
-        <Button
-          className="mt-6 w-full"
-          onClick={() => {
-            update.mutate(
-              { id: order.id, data: { status: "completed" } },
-              {
-                onSuccess: () => {
-                  qc.invalidateQueries({ queryKey: getListOrdersQueryKey() });
-                  close();
+        {!['completed', 'cancelled'].includes(order.status) && (
+          <Button
+            className="mt-6 w-full"
+            disabled={update.isPending}
+            onClick={() => {
+              update.mutate(
+                { id: order.id, data: { status: "completed" } },
+                {
+                  onSuccess: (updatedOrder: any) => {
+                    onUpdated(updatedOrder);
+                    close();
+                  },
                 },
-              },
-            );
-          }}
-          data-testid="button-complete-order"
-        >
-          <Check size={16} /> Mark completed
-        </Button>
+              );
+            }}
+            data-testid="button-complete-order"
+          >
+            <Check size={16} /> Mark completed
+          </Button>
+        )}
       </div>
     </div>
   );
