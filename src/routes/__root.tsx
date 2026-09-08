@@ -77,7 +77,12 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { name: "author", content: "Specialty Burger" },
+      { title: "Specialty Burger — منيو المطعم" },
+      { name: "description", content: "منيو Specialty Burger التفاعلي: اختر أصنافك، خصّص برجرك، وأرسل الطلب عبر واتساب." },
+      { property: "og:title", content: "Specialty Burger — منيو المطعم" },
+      { property: "og:description", content: "منيو Specialty Burger التفاعلي: اختر أصنافك، خصّص برجرك، وأرسل الطلب عبر واتساب." },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
     ],
     links: [
       {
@@ -88,12 +93,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       {
         rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap",
+        href: "https://fonts.googleapis.com/css2?family=Almarai:wght@400;700;800&family=DM+Mono:wght@400;500&family=Oswald:wght@500;600;700&display=swap",
       },
-      { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      { rel: "icon", type: "image/png", href: "/favicon.png" },
     ],
   }),
-
   shellComponent: RootShell,
   component: RootComponent,
   notFoundComponent: NotFoundComponent,
