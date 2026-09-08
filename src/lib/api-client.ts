@@ -9,8 +9,15 @@ export type Product = {
 };
 export type Category = { id: string; name: string; nameAr: string; count: number; image: string; enabled: boolean; order: number };
 export type Offer = { id: string; name: string; description: string; type: string; value: number; code: string | null; startDate: string; endDate: string; status: string; uses: number; maxUses: number; target: string };
-type OrderItem = { id?: string; productId?: string; name?: string; quantity?: number; price?: number };
-type OrderRecord = { id: string; number?: string; customer?: string; customerId?: string; items?: OrderItem[]; total?: number; createdAt: string; status?: string; [key: string]: unknown };
+type OrderAddon = { id?: string; name?: string; name_ar?: string; price?: number; quantity?: number; [key: string]: unknown };
+type OrderItem = {
+  id?: string; productId?: string; name?: string; name_ar?: string; quantity?: number; price?: number;
+  unitPrice?: number; subtotal?: number; addons?: OrderAddon[]; [key: string]: unknown;
+};
+type OrderRecord = {
+  id: string; number?: string; tableNumber?: string | number; items?: OrderItem[]; subtotal?: number;
+  total?: number; createdAt: string; updatedAt?: string; status?: string; [key: string]: unknown;
+};
 type JsonRow = { id: string; data: Record<string, unknown> | null; created_at: string };
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
@@ -120,9 +127,76 @@ async function jsonRows(table: string): Promise<JsonRow[]> {
   if (error) throw error;
   return (data ?? []) as JsonRow[];
 }
+const numericValue = (value: unknown) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+};
+const firstValue = (...values: unknown[]) => values.find((value) => value !== undefined && value !== null && value !== "");
+const normalizeStatus = (value: unknown) => String(value ?? "new").trim().toLowerCase().replaceAll(" ", "_");
+
+function normalizeAddon(addon: any): OrderAddon {
+  return {
+    ...addon,
+    id: addon.id ?? addon.addon_id,
+    name: String(firstValue(addon.name, addon.title, addon.label, addon.addon_name, addon.id) ?? ""),
+    price: numericValue(firstValue(addon.price, addon.unit_price, addon.amount)) ?? 0,
+    quantity: numericValue(firstValue(addon.quantity, addon.qty)) ?? 1,
+  };
+}
+
+function normalizeOrderItem(item: any, index: number): OrderItem {
+  const addons = (firstValue(item.addons, item.add_ons, item.options, item.extras) as any[] | undefined)?.map(normalizeAddon) ?? [];
+  const quantity = numericValue(firstValue(item.quantity, item.qty, item.count)) ?? 1;
+  const addonTotal = addons.reduce((sum, addon) => sum + Number(addon.price ?? 0) * Number(addon.quantity ?? 1), 0);
+  const storedSubtotal = numericValue(firstValue(item.subtotal, item.item_subtotal, item.line_total, item.total));
+  const unitPrice = numericValue(firstValue(item.unitPrice, item.unit_price, item.price, item.product?.price)) ?? (storedSubtotal == null ? 0 : Math.max(0, (storedSubtotal - addonTotal) / quantity));
+  const subtotal = storedSubtotal ?? quantity * unitPrice + addonTotal;
+  return {
+    ...item,
+    id: item.id ?? item.product_id ?? `item-${index}`,
+    productId: item.productId ?? item.product_id ?? item.product?.id,
+    name: String(firstValue(item.name, item.product_name, item.productName, item.title, item.product?.name, item.product_id) ?? ""),
+    quantity,
+    price: unitPrice,
+    unitPrice,
+    subtotal,
+    addons,
+  };
+}
+
+function normalizeOrder(row: any): OrderRecord {
+  const items = (Array.isArray(row.items) ? row.items : []).map(normalizeOrderItem);
+  const calculatedSubtotal = items.reduce((sum: number, item: OrderItem) => sum + Number(item.subtotal ?? 0), 0);
+  const storedSubtotal = numericValue(row.subtotal);
+  const storedTotal = numericValue(row.total_amount);
+  const total = storedTotal ?? calculatedSubtotal;
+  return {
+    id: row.id,
+    number: String(row.order_number ?? ""),
+    tableNumber: row.table_number,
+    items,
+    subtotal: storedSubtotal ?? calculatedSubtotal,
+    total,
+    createdAt: String(row.created_at ?? ""),
+    updatedAt: String(row.updated_at ?? ""),
+    status: normalizeStatus(row.status),
+  };
+}
+async function listOrders() {
+  const { client } = await requireUser();
+  const { data, error } = await client
+    .from("orders")
+    .select("id,order_number,table_number,items,subtotal,total_amount,status,created_at,updated_at")
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(normalizeOrder);
+}
 async function jsonList(table: string) {
   const rows = await jsonRows(table);
-  return rows.map((row) => ({ ...(row.data ?? {}), id: row.data?.id ?? row.id, createdAt: row.data?.createdAt ?? row.data?.created_at ?? row.created_at }));
+  return rows.map((row) => {
+    const value = { ...(row.data ?? {}), id: row.data?.id ?? row.id, createdAt: row.data?.createdAt ?? row.data?.created_at ?? row.created_at };
+    return table === "orders" ? normalizeOrder(value) : value;
+  });
 }
 async function jsonUpdate(table: string, id: string, patch: any) {
   const { client } = await requireUser();
@@ -179,17 +253,17 @@ function buildCategorySales(orders: OrderRecord[], products: Product[]) {
 }
 
 async function fetchDashboardData() {
-  const [products, orderRows, offers, customers] = await Promise.all([fetchProducts(), jsonList("orders"), jsonList("offers"), jsonList("customers")]);
+  const [products, orderRows, offers, customers] = await Promise.all([fetchProducts(), listOrders(), jsonList("offers"), jsonList("customers")]);
   const orders = orderRows as OrderRecord[]; const active = orders.filter((order) => !isCancelled(order)); const today = localDayKey(new Date()); const todayOrders = orders.filter((order) => localDayKey(orderDate(order)) === today); const todayRevenue = todayOrders.filter((order) => !isCancelled(order)).reduce((sum, order) => sum + orderValue(order), 0); const previousDay = new Date(); previousDay.setDate(previousDay.getDate() - 1); const previousRevenue = active.filter((order) => localDayKey(orderDate(order)) === localDayKey(previousDay)).reduce((sum, order) => sum + orderValue(order), 0);
   const kitchenStatuses = ["confirmed", "preparing", "ready"]; const kitchenOrders = orders.filter((order) => kitchenStatuses.includes(String(order.status ?? ""))).length; const lastOrder = [...orders].sort((a, b) => orderDate(b).getTime() - orderDate(a).getTime())[0]; const productSales = buildProductSales(active, products);
-  return { todayRevenue, revenueChange: previousRevenue > 0 ? ((todayRevenue - previousRevenue) / previousRevenue) * 100 : null, todayOrders: todayOrders.length, customers: customers.length, averageOrder: active.length ? active.reduce((sum, order) => sum + orderValue(order), 0) / active.length : 0, menuItems: products.length, activeOffers: offers.filter((offer: any) => offer.status === "active").length, revenueSeries: buildSalesData(orders, rangeStart("7d"), 7), kitchenOrders, whatsappStatus: "WhatsApp status unavailable", lastOrderAt: lastOrder?.createdAt ?? null, statusBreakdown: [...new Set(orders.map((order) => String(order.status ?? "").toLowerCase()).filter(Boolean))].map((status) => ({ label: titleize(status), value: orders.filter((order) => order.status === status).length })), categorySales: buildCategorySales(active, products), topProducts: productSales.slice(0, 5), recentOrders: orders.sort((a, b) => orderDate(b).getTime() - orderDate(a).getTime()).slice(0, 5) };
+  return { todayRevenue, revenueChange: previousRevenue > 0 ? ((todayRevenue - previousRevenue) / previousRevenue) * 100 : null, todayOrders: todayOrders.length, customers: customers.length, averageOrder: todayOrders.length ? todayRevenue / todayOrders.length : 0, menuItems: products.length, activeOffers: offers.filter((offer: any) => offer.status === "active").length, revenueSeries: buildSalesData(orders, rangeStart("7d"), 7), kitchenOrders, whatsappStatus: "WhatsApp status unavailable", lastOrderAt: lastOrder?.createdAt ?? null, statusBreakdown: [...new Set(orders.map((order) => String(order.status ?? "").toLowerCase()).filter(Boolean))].map((status) => ({ label: titleize(status), value: orders.filter((order) => order.status === status).length })), categorySales: buildCategorySales(active, products), topProducts: productSales.slice(0, 5), recentOrders: orders.sort((a, b) => orderDate(b).getTime() - orderDate(a).getTime()).slice(0, 5) };
 }
 
 export const useGetDashboardSummary = (params: unknown = {}) => useQuery({ queryKey: getGetDashboardSummaryQueryKey(params), queryFn: fetchDashboardData, refetchInterval: 30000 });
 
 export const useGetAnalytics = (params: { range?: string } = {}) => useQuery({
   queryKey: getGetAnalyticsQueryKey(params), refetchInterval: 30000,
-  queryFn: async () => { const [products, orderRows, customers] = await Promise.all([fetchProducts(), jsonList("orders"), jsonList("customers")]); const orders = orderRows as OrderRecord[]; const start = rangeStart(params.range ?? "7d"); const count = params.range === "today" ? 1 : params.range === "30d" || params.range === "month" ? 30 : 7; const filtered = orders.filter((order) => orderDate(order) >= start); const active = filtered.filter((order) => !isCancelled(order)); const productSales = buildProductSales(active, products); const customerIds = new Set(active.map((order) => order.customerId).filter(Boolean)); const customerOrderCounts = new Map<string, number>(); for (const order of active) if (order.customerId) customerOrderCounts.set(order.customerId, (customerOrderCounts.get(order.customerId) ?? 0) + 1); const returningCustomers = [...customerOrderCounts.values()].filter((count) => count > 1).length; const newCustomers = customers.filter((customer: any) => customer.registeredAt && new Date(customer.registeredAt) >= start).length; const peakHours = new Map<number, number>(); for (const order of active) { const hour = orderDate(order).getHours(); peakHours.set(hour, (peakHours.get(hour) ?? 0) + 1); } const peak = [...peakHours.entries()].sort((a, b) => b[1] - a[1])[0]; return { revenue: active.reduce((sum, order) => sum + orderValue(order), 0), orders: filtered.length, averageOrder: active.length ? active.reduce((sum, order) => sum + orderValue(order), 0) / active.length : 0, customerGrowth: null, peakHour: peak ? `${String(peak[0]).padStart(2, "0")}:00` : "—", newCustomers: customers.some((customer: any) => customer.registeredAt) ? newCustomers : null, returningCustomers: customerIds.size ? returningCustomers : null, salesSeries: buildSalesData(orders, start, count), topProducts: productSales, categories: buildCategorySales(active, products), customerCount: customers.length }; }
+  queryFn: async () => { const [products, orderRows, customers] = await Promise.all([fetchProducts(), listOrders(), jsonList("customers")]); const orders = orderRows as OrderRecord[]; const start = rangeStart(params.range ?? "7d"); const count = params.range === "today" ? 1 : params.range === "30d" || params.range === "month" ? 30 : 7; const filtered = orders.filter((order) => orderDate(order) >= start); const active = filtered.filter((order) => !isCancelled(order)); const productSales = buildProductSales(active, products); const peakHours = new Map<number, number>(); for (const order of active) { const hour = orderDate(order).getHours(); peakHours.set(hour, (peakHours.get(hour) ?? 0) + 1); } const peak = [...peakHours.entries()].sort((a, b) => b[1] - a[1])[0]; return { revenue: active.reduce((sum, order) => sum + orderValue(order), 0), orders: filtered.length, averageOrder: active.length ? active.reduce((sum, order) => sum + orderValue(order), 0) / active.length : 0, customerGrowth: null, peakHour: peak ? `${String(peak[0]).padStart(2, "0")}:00` : "—", newCustomers: null, returningCustomers: null, salesSeries: buildSalesData(orders, start, count), topProducts: productSales, categories: buildCategorySales(active, products), customerCount: customers.length }; }
 });
 
 async function fetchProducts(params: any = {}) {
@@ -246,10 +320,12 @@ export const useListCategories = () => useQuery({
   }
 });
 
-export const useListOrders = (params:any={}) => useQuery({queryKey:getListOrdersQueryKey(params),queryFn:async()=>{
-  const rows=await jsonList("orders"); const s=String(params.search??"").toLowerCase(), status=params.status??"all";
-  return rows.filter((o:any)=>(!s||`${o.number} ${o.customer} ${o.phone}`.toLowerCase().includes(s))&&(status==="all"||o.status===status));
-}});
+export const useListOrders = (params:any={}) => useQuery({
+  queryKey:getListOrdersQueryKey(params), refetchInterval:30000, queryFn:async()=>{
+    const rows=await listOrders(); const s=String(params.search??"").toLowerCase(), status=params.status??"all", date=params.date;
+    return rows.filter((o:any)=>{const matchesSearch=!s||`${o.number} ${o.tableNumber ?? ""}`.toLowerCase().includes(s);const matchesStatus=status==="all"||o.status===status;const matchesDate=!date||localDayKey(new Date(o.createdAt))===date;return matchesSearch&&matchesStatus&&matchesDate;});
+  }
+});
 export const useListCustomers = (params:any={}) => useQuery({queryKey:getListCustomersQueryKey(params),queryFn:async()=>{
   const rows=await jsonList("customers"),s=String(params.search??"").toLowerCase();
   return rows.filter((c:any)=>!s||`${c.name} ${c.email} ${c.phone}`.toLowerCase().includes(s));
@@ -296,7 +372,7 @@ export const useUpdateCategory=()=>useMutation({mutationFn:async({id,data}:any)=
 }});
 export const useDeleteCategory=()=>useMutation({mutationFn:async({id}:any)=>{const {client}=await requireUser();const {error}=await client.from("categories").delete().eq("id",id);if(error)throw error;}});
 
-export const useUpdateOrder=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({id,data}:any)=>jsonUpdate("orders",id,data),onSuccess:()=>invalidateLiveStats(queryClient)});};
+export const useUpdateOrder=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:async({id,data}:any)=>{const {client}=await requireUser();const {data:row,error}=await client.from("orders").update({status:data.status}).eq("id",id).select("id,order_number,table_number,items,subtotal,total_amount,status,created_at,updated_at").single();if(error)throw error;return normalizeOrder(row);},onSuccess:()=>invalidateLiveStats(queryClient)});};
 export const useCreateOffer=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({data}:any)=>jsonInsert("offers",{...data,id:`offer-${crypto.randomUUID().slice(0,8)}`}),onSuccess:()=>invalidateLiveStats(queryClient)});};
 export const useUpdateOffer=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({id,data}:any)=>jsonUpdate("offers",id,data),onSuccess:()=>invalidateLiveStats(queryClient)});};
 export const useDeleteOffer=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({id}:any)=>jsonDelete("offers",id),onSuccess:()=>invalidateLiveStats(queryClient)});};
@@ -307,3 +383,4 @@ export const useDeleteReview=()=>useMutation({mutationFn:({id}:any)=>jsonDelete(
 export const useMarkNotificationRead=()=>useMutation({mutationFn:({id}:any)=>jsonUpdate("notifications",id,{read:true})});
 
 function titleize(s:string){return s.charAt(0).toUpperCase()+s.slice(1).replaceAll("_"," ");}
+
