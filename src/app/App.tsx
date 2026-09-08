@@ -106,18 +106,8 @@ const formatCurrentDate = () =>
     month: "long",
     year: "numeric",
   });
-const relativeTime = (d?: string | null) => {
-  if (!d) return "No orders yet";
-  const seconds = Math.round((new Date(d).getTime() - Date.now()) / 1000);
-  const absolute = Math.abs(seconds);
-  if (absolute < 60) return "Just now";
-  const unit = absolute < 3600 ? "minute" : absolute < 86400 ? "hour" : "day";
-  const divisor = unit === "minute" ? 60 : unit === "hour" ? 3600 : 86400;
-  return new Intl.RelativeTimeFormat("en", { numeric: "auto" }).format(
-    Math.round(seconds / divisor),
-    unit,
-  );
-};
+const minutesSince = (d?: string | null) =>
+  d ? Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / 60000)) : null;
 
 function Logo({ compact = false }: { compact?: boolean }) {
   return (
@@ -544,6 +534,10 @@ function Dashboard() {
   const summary = d || {};
   const revenue = summary.revenueSeries || [];
   const recent = summary.recentOrders || [];
+  const latestOrder = recent[0];
+  const activeStatusSummary = (summary.activeStatusBreakdown || [])
+    .map((status: any) => `${status.value} ${status.label}`)
+    .join(" · ");
   return (
     <div className="enter">
       <PageIntro
@@ -643,14 +637,17 @@ function Dashboard() {
           <div className="mt-6 space-y-3">
             <div className="rounded-xl bg-background/10 p-3">
               <div className="flex justify-between text-xs font-bold">
-                <span>Orders in kitchen</span>
-                <span className="text-primary">{summary.kitchenOrders ?? 0}</span>
+                <span>Active Orders</span>
+                <span className="text-primary">{summary.activeOrders ?? 0}</span>
               </div>
+              <p className="mt-2 text-[10px] text-background/60">
+                {summary.activeOrders ?? 0} Active Orders{activeStatusSummary ? ` · ${activeStatusSummary}` : ""}
+              </p>
               <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-background/15">
                 <div
                   className="h-full rounded-full bg-primary"
                   style={{
-                    width: `${Math.min(100, (Number(summary.kitchenOrders ?? 0) / Math.max(Number(summary.todayOrders ?? 0), 1)) * 100)}%`,
+                    width: `${Math.min(100, (Number(summary.activeOrders ?? 0) / Math.max(Number(summary.todayOrders ?? 0), 1)) * 100)}%`,
                   }}
                 />
               </div>
@@ -660,18 +657,41 @@ function Dashboard() {
                 <MessageCircle size={15} />
               </div>
               <div>
-                <p className="text-xs font-bold">{summary.whatsappStatus}</p>
+                <p className="text-xs font-bold">
+                  {summary.lastOrderAt == null
+                    ? "No orders received yet"
+                    : `Last order received ${minutesSince(summary.lastOrderAt)} minutes ago`}
+                </p>
                 <p className="mt-0.5 text-[10px] text-background/55">
-                  Last order: {relativeTime(summary.lastOrderAt)}
+                  Based on the latest order
                 </p>
               </div>
             </div>
+            {latestOrder && (
+              <div className="rounded-xl bg-background/10 p-3">
+                <div className="flex items-center justify-between text-xs font-bold">
+                  <span>Latest order</span>
+                  <Badge tone={latestOrder.status === "cancelled" ? "red" : latestOrder.status === "completed" ? "green" : "yellow"}>
+                    {titleize(latestOrder.status)}
+                  </Badge>
+                </div>
+                <div className="mt-3 flex items-end justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-bold">Order #{String(latestOrder.number).replace(/^#/, "")}</p>
+                    <p className="mt-1 text-[10px] text-background/60">
+                      Table {latestOrder.tableNumber ?? "—"} · {(latestOrder.items || []).reduce((count: number, item: any) => count + Number(item.quantity ?? 1), 0)} Items
+                    </p>
+                  </div>
+                  <b className="text-sm text-primary">{money(latestOrder.total)}</b>
+                </div>
+              </div>
+            )}
             <Link
               href="/orders"
               className="flex items-center justify-between border-t border-background/15 pt-4 text-xs font-bold text-primary"
               data-testid="link-live-orders"
             >
-              Open order board <span>←</span>
+              Open Orders <span>←</span>
             </Link>
           </div>
         </section>
@@ -2485,7 +2505,7 @@ function NotificationsPage() {
       <PageIntro
         eyebrow="Signal desk"
         title="Nothing slips past."
-        subtitle="Updates from orders, guests and the kitchen."
+        subtitle="Updates from orders and guests."
         action={
           <Button
             variant="outline"
