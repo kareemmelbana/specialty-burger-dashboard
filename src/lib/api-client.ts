@@ -191,6 +191,56 @@ async function listOrders() {
   if (error) throw error;
   return (data ?? []).map(normalizeOrder);
 }
+export type DineInOrderInput = {
+  orderNumber: string | number;
+  tableNumber: string | number;
+  items: OrderItem[];
+  subtotal: number;
+  totalAmount: number;
+};
+
+export async function createDineInOrder(input: DineInOrderInput) {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from("orders")
+    .insert({
+      id: crypto.randomUUID(),
+      order_number: String(input.orderNumber),
+      table_number: input.tableNumber,
+      items: input.items,
+      subtotal: Number(input.subtotal),
+      total_amount: Number(input.totalAmount),
+    })
+    .select("id,order_number,table_number,items,subtotal,total_amount,created_at")
+    .single();
+  if (error) throw error;
+  return normalizeOrder(data);
+}
+export async function createOrderNotification(order: any) {
+  const { client } = await requireUser();
+  const orderNumber = String(order.order_number ?? order.number ?? "").replace(/^#/, "");
+  const tableNumber = order.table_number ?? order.tableNumber ?? "—";
+  const items = Array.isArray(order.items) ? order.items : [];
+  const itemCount = items.reduce((count: number, item: any) => count + Number(item.quantity ?? 1), 0);
+  const createdAt = String(order.created_at ?? order.createdAt ?? new Date().toISOString());
+  const id = `order-${String(order.id)}`;
+  const { error } = await client.from("notifications").upsert(
+    {
+      id,
+      data: {
+        id,
+        type: "new_order",
+        title: `New order #${orderNumber}`,
+        description: `Table ${tableNumber} · ${itemCount} items`,
+        time: new Date(createdAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+        read: false,
+        createdAt,
+      },
+    },
+    { onConflict: "id", ignoreDuplicates: true },
+  );
+  if (error) throw error;
+}
 async function jsonList(table: string) {
   const rows = await jsonRows(table);
   return rows.map((row) => {
@@ -254,9 +304,9 @@ function buildCategorySales(orders: OrderRecord[], products: Product[]) {
 
 async function fetchDashboardData() {
   const [products, orderRows, offers, customers] = await Promise.all([fetchProducts(), listOrders(), jsonList("offers"), jsonList("customers")]);
-  const orders = orderRows as OrderRecord[]; const active = orders.filter((order) => !isCancelled(order)); const activeOrders = orders.filter((order) => !["completed", "cancelled"].includes(String(order.status ?? "").toLowerCase())); const today = localDayKey(new Date()); const todayOrders = orders.filter((order) => localDayKey(orderDate(order)) === today); const todayRevenue = todayOrders.filter((order) => !isCancelled(order)).reduce((sum, order) => sum + orderValue(order), 0); const previousDay = new Date(); previousDay.setDate(previousDay.getDate() - 1); const previousRevenue = active.filter((order) => localDayKey(orderDate(order)) === localDayKey(previousDay)).reduce((sum, order) => sum + orderValue(order), 0);
+  const orders = orderRows as OrderRecord[]; const active = orders.filter((order) => !isCancelled(order)); const activeOrders = orders.filter((order) => !["completed", "cancelled"].includes(String(order.status ?? "").toLowerCase())); const now = new Date(); const today = localDayKey(now); const todayOrders = orders.filter((order) => localDayKey(orderDate(order)) === today); const weekStart = new Date(now); weekStart.setHours(0, 0, 0, 0); weekStart.setDate(now.getDate() - (now.getDay() === 0 ? 6 : now.getDay() - 1)); const monthStart = new Date(now.getFullYear(), now.getMonth(), 1); const weekOrders = orders.filter((order) => orderDate(order) >= weekStart); const monthOrders = orders.filter((order) => orderDate(order) >= monthStart); const todayRevenue = todayOrders.filter((order) => !isCancelled(order)).reduce((sum, order) => sum + orderValue(order), 0); const previousDay = new Date(); previousDay.setDate(previousDay.getDate() - 1); const previousRevenue = active.filter((order) => localDayKey(orderDate(order)) === localDayKey(previousDay)).reduce((sum, order) => sum + orderValue(order), 0);
   const lastOrder = [...orders].sort((a, b) => orderDate(b).getTime() - orderDate(a).getTime())[0]; const activeStatusBreakdown = [...new Set(activeOrders.map((order) => String(order.status ?? "").toLowerCase()).filter(Boolean))].map((status) => ({ label: titleize(status), value: activeOrders.filter((order) => order.status === status).length })); const productSales = buildProductSales(active, products);
-  return { todayRevenue, revenueChange: previousRevenue > 0 ? ((todayRevenue - previousRevenue) / previousRevenue) * 100 : null, todayOrders: todayOrders.length, customers: customers.length, averageOrder: todayOrders.length ? todayRevenue / todayOrders.length : 0, menuItems: products.length, activeOffers: offers.filter((offer: any) => offer.status === "active").length, revenueSeries: buildSalesData(orders, rangeStart("7d"), 7), activeOrders: activeOrders.length, lastOrderAt: lastOrder?.createdAt ?? null, activeStatusBreakdown, categorySales: buildCategorySales(active, products), topProducts: productSales.slice(0, 5), recentOrders: orders.sort((a, b) => orderDate(b).getTime() - orderDate(a).getTime()).slice(0, 5) };
+  return { todayRevenue, revenueChange: previousRevenue > 0 ? ((todayRevenue - previousRevenue) / previousRevenue) * 100 : null, todayOrders: todayOrders.length, weekOrders: weekOrders.length, monthOrders: monthOrders.length, customers: customers.length, averageOrder: todayOrders.length ? todayRevenue / todayOrders.length : 0, menuItems: products.length, activeOffers: offers.filter((offer: any) => offer.status === "active").length, revenueSeries: buildSalesData(orders, rangeStart("7d"), 7), activeOrders: activeOrders.length, lastOrderAt: lastOrder?.createdAt ?? null, activeStatusBreakdown, categorySales: buildCategorySales(active, products), topProducts: productSales.slice(0, 5), recentOrders: orders.sort((a, b) => orderDate(b).getTime() - orderDate(a).getTime()).slice(0, 5) };
 }
 
 export const useGetDashboardSummary = (params: unknown = {}) => useQuery({ queryKey: getGetDashboardSummaryQueryKey(params), queryFn: fetchDashboardData, refetchInterval: 30000 });
@@ -322,8 +372,8 @@ export const useListCategories = () => useQuery({
 
 export const useListOrders = (params:any={}) => useQuery({
   queryKey:getListOrdersQueryKey(params), refetchInterval:30000, queryFn:async()=>{
-    const rows=await listOrders(); const s=String(params.search??"").toLowerCase(), status=params.status??"all", date=params.date;
-    return rows.filter((o:any)=>{const matchesSearch=!s||`${o.number} ${o.tableNumber ?? ""}`.toLowerCase().includes(s);const matchesStatus=status==="all"||o.status===status;const matchesDate=!date||localDayKey(new Date(o.createdAt))===date;return matchesSearch&&matchesStatus&&matchesDate;});
+    const rows=await listOrders(); const s=String(params.search??"").toLowerCase(), date=params.date;
+    return rows.filter((o:any)=>{const matchesSearch=!s||`${o.number} ${o.tableNumber ?? ""}`.toLowerCase().includes(s);const matchesDate=!date||localDayKey(new Date(o.createdAt))===date;return matchesSearch&&matchesDate;});
   }
 });
 export const useListCustomers = (params:any={}) => useQuery({queryKey:getListCustomersQueryKey(params),queryFn:async()=>{
@@ -372,7 +422,6 @@ export const useUpdateCategory=()=>useMutation({mutationFn:async({id,data}:any)=
 }});
 export const useDeleteCategory=()=>useMutation({mutationFn:async({id}:any)=>{const {client}=await requireUser();const {error}=await client.from("categories").delete().eq("id",id);if(error)throw error;}});
 
-export const useUpdateOrder=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:async({id,data}:any)=>{const {client}=await requireUser();const {data:row,error}=await client.from("orders").update({status:data.status}).eq("id",id).select("id,order_number,table_number,items,subtotal,total_amount,status,created_at,updated_at").single();if(error)throw error;return normalizeOrder(row);},onSuccess:()=>{invalidateLiveStats(queryClient);queryClient.invalidateQueries({queryKey:getListOrdersQueryKey()});}});};
 export const useCreateOffer=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({data}:any)=>jsonInsert("offers",{...data,id:`offer-${crypto.randomUUID().slice(0,8)}`}),onSuccess:()=>invalidateLiveStats(queryClient)});};
 export const useUpdateOffer=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({id,data}:any)=>jsonUpdate("offers",id,data),onSuccess:()=>invalidateLiveStats(queryClient)});};
 export const useDeleteOffer=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({id}:any)=>jsonDelete("offers",id),onSuccess:()=>invalidateLiveStats(queryClient)});};

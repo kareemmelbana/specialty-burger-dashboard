@@ -12,7 +12,21 @@ create table if not exists public.categories (id text primary key,name text not 
 create table if not exists public.products (id text primary key,name text not null,name_ar text not null default '',description text not null default '',price numeric(10,2) not null default 0,discount_price numeric(10,2),category_id text references public.categories(id) on update cascade on delete set null,image text not null default '',available boolean not null default true,featured boolean not null default false,bestseller boolean not null default false,is_new boolean not null default false,prep_time integer not null default 10,calories integer,created_at timestamptz not null default now());
 create index if not exists products_category_id_idx on public.products(category_id);
 
-create table if not exists public.orders (id text primary key,data jsonb not null default '{}'::jsonb,created_at timestamptz not null default now());
+create table if not exists public.orders (id text primary key,order_number text,table_number text,items jsonb not null default '[]'::jsonb,subtotal numeric(10,2) not null default 0,total_amount numeric(10,2) not null default 0,status text,data jsonb not null default '{}'::jsonb,created_at timestamptz not null default now());
+alter table public.orders add column if not exists order_number text;
+alter table public.orders add column if not exists table_number text;
+alter table public.orders add column if not exists items jsonb not null default '[]'::jsonb;
+alter table public.orders add column if not exists subtotal numeric(10,2) not null default 0;
+alter table public.orders add column if not exists total_amount numeric(10,2) not null default 0;
+alter table public.orders add column if not exists status text;
+
+update public.orders
+set order_number = coalesce(order_number, nullif(data->>'order_number', '')),
+	table_number = coalesce(table_number, nullif(data->>'table_number', '')),
+	items = case when items = '[]'::jsonb and jsonb_typeof(data->'items') = 'array' then data->'items' else items end,
+	subtotal = case when subtotal = 0 and (data->>'subtotal') ~ '^[0-9]+(\.[0-9]+)?$' then (data->>'subtotal')::numeric else subtotal end,
+	total_amount = case when total_amount = 0 and (data->>'total_amount') ~ '^[0-9]+(\.[0-9]+)?$' then (data->>'total_amount')::numeric else total_amount end
+where data <> '{}'::jsonb;
 create table if not exists public.customers (id text primary key,data jsonb not null default '{}'::jsonb,created_at timestamptz not null default now());
 create table if not exists public.offers (id text primary key,data jsonb not null default '{}'::jsonb,created_at timestamptz not null default now());
 create table if not exists public.reviews (id text primary key,data jsonb not null default '{}'::jsonb,created_at timestamptz not null default now());
@@ -44,6 +58,14 @@ drop policy if exists "admins write products" on public.products;
 create policy "admins write products" on public.products for all using (public.is_admin()) with check (public.is_admin());
 drop policy if exists "admins all orders" on public.orders;
 create policy "admins all orders" on public.orders for all using (public.is_admin()) with check (public.is_admin());
+drop policy if exists "public create dine-in orders" on public.orders;
+create policy "public create dine-in orders" on public.orders for insert to anon, authenticated with check (
+	nullif(trim(order_number), '') is not null
+	and nullif(trim(table_number), '') is not null
+	and jsonb_typeof(items) = 'array'
+	and subtotal >= 0
+	and total_amount >= 0
+);
 drop policy if exists "admins all customers" on public.customers;
 create policy "admins all customers" on public.customers for all using (public.is_admin()) with check (public.is_admin());
 drop policy if exists "admins all offers" on public.offers;

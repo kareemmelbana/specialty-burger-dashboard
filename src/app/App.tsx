@@ -56,6 +56,7 @@ import {
   getListNotificationsQueryKey,
   getListOffersQueryKey,
   getListOrdersQueryKey,
+  createOrderNotification,
   getListProductsQueryKey,
   getListReviewsQueryKey,
   useCreateCategory,
@@ -79,7 +80,6 @@ import {
   useMarkNotificationRead,
   useUpdateCategory,
   useUpdateOffer,
-  useUpdateOrder,
   useUpdateProduct,
   useUpdateRestaurantSettings,
   useUpdateReview,
@@ -89,6 +89,7 @@ import {
   uploadProductImage,
 } from "@/lib/api-client";
 import { Link, Route, Switch, useLocation, useParams } from "wouter";
+import { useToast } from "@/hooks/use-toast";
 
 const queryClient = new QueryClient();
 const money = (n = 0) =>
@@ -107,7 +108,7 @@ const orderTimeLabel = (d?: string | null) => {
   const today = new Date();
   const sameDay = date.getFullYear() === today.getFullYear() && date.getMonth() === today.getMonth() && date.getDate() === today.getDate();
   return sameDay
-    ? `Today ${date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}`
+    ? `Today, ${date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}`
     : date.toLocaleDateString("en-GB", { day: "2-digit", month: "short" }) + ` ${date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
 };
 const localOrderDay = (d?: string | null) => {
@@ -124,6 +125,12 @@ const formatCurrentDate = () =>
     month: "long",
     year: "numeric",
   });
+const dateInputValue = (date = new Date()) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 const minutesSince = (d?: string | null) =>
   d ? Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / 60000)) : null;
 
@@ -193,6 +200,21 @@ function Shell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const interval = window.setInterval(() => setCurrentDate(formatCurrentDate()), 60_000);
     return () => window.clearInterval(interval);
+  }, []);
+  useEffect(() => {
+    const client = supabase;
+    if (!client) return;
+    const channel = client
+      .channel("order-notifications")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "orders" }, (payload) => {
+        void createOrderNotification(payload.new).then(() => {
+          void queryClient.invalidateQueries({ queryKey: getListNotificationsQueryKey() });
+        }).catch((error) => {
+          console.error("Could not create order notification", error);
+        });
+      })
+      .subscribe();
+    return () => { void client.removeChannel(channel); };
   }, []);
   const logout = async () => {
     if (supabase) await supabase.auth.signOut();
@@ -555,9 +577,6 @@ function Dashboard() {
   const revenue = summary.revenueSeries || [];
   const recent = summary.recentOrders || [];
   const latestOrder = recent[0];
-  const activeStatusSummary = (summary.activeStatusBreakdown || [])
-    .map((status: any) => `${status.value} ${status.label}`)
-    .join(" · ");
   return (
     <div className="enter">
       <PageIntro
@@ -566,10 +585,6 @@ function Dashboard() {
         subtitle="Fresh off the grill, at a glance."
         action={
           <div className="flex items-center gap-2">
-            <Badge tone="green">
-              <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-[#278b68]" /> Accepting
-              orders
-            </Badge>
             <a
               href="https://specialty-burger.vercel.app/"
               target="_blank"
@@ -599,6 +614,18 @@ function Dashboard() {
           value={String(summary.todayOrders ?? 0)}
           icon={ShoppingBag}
           tone="mint"
+        />
+        <Metric
+          label="Orders this week"
+          value={String(summary.weekOrders ?? 0)}
+          icon={ShoppingBag}
+          tone="dark"
+        />
+        <Metric
+          label="Orders this month"
+          value={String(summary.monthOrders ?? 0)}
+          icon={ShoppingBag}
+          tone="red"
         />
         <Metric
           label="Average order"
@@ -657,17 +684,17 @@ function Dashboard() {
           <div className="mt-6 space-y-3">
             <div className="rounded-xl bg-background/10 p-3">
               <div className="flex justify-between text-xs font-bold">
-                <span>Active Orders</span>
-                <span className="text-primary">{summary.activeOrders ?? 0}</span>
+                <span>Orders Today</span>
+                <span className="text-primary">{summary.todayOrders ?? 0}</span>
               </div>
               <p className="mt-2 text-[10px] text-background/60">
-                {summary.activeOrders ?? 0} Active Orders{activeStatusSummary ? ` · ${activeStatusSummary}` : ""}
+                Orders received today
               </p>
               <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-background/15">
                 <div
                   className="h-full rounded-full bg-primary"
                   style={{
-                    width: `${Math.min(100, (Number(summary.activeOrders ?? 0) / Math.max(Number(summary.todayOrders ?? 0), 1)) * 100)}%`,
+                    width: `${summary.todayOrders ? 100 : 0}%`,
                   }}
                 />
               </div>
@@ -679,31 +706,32 @@ function Dashboard() {
               <div>
                 <p className="text-xs font-bold">
                   {summary.lastOrderAt == null
-                    ? "No orders received yet"
+                    ? "No orders received today"
                     : `Last order received ${minutesSince(summary.lastOrderAt)} minutes ago`}
-                </p>
-                <p className="mt-0.5 text-[10px] text-background/55">
-                  Based on the latest order
                 </p>
               </div>
             </div>
             {latestOrder && (
               <div className="rounded-xl bg-background/10 p-3">
-                <div className="flex items-center justify-between text-xs font-bold">
-                  <span>Latest order</span>
-                  <Badge tone={latestOrder.status === "cancelled" ? "red" : latestOrder.status === "completed" ? "green" : "yellow"}>
-                    {titleize(latestOrder.status)}
-                  </Badge>
-                </div>
+                <p className="text-xs font-bold">Latest order</p>
                 <div className="mt-3 flex items-end justify-between gap-3">
                   <div>
                     <p className="text-sm font-bold">Order #{String(latestOrder.number).replace(/^#/, "")}</p>
                     <p className="mt-1 text-[10px] text-background/60">
                       Table {latestOrder.tableNumber ?? "—"} · {(latestOrder.items || []).reduce((count: number, item: any) => count + Number(item.quantity ?? 1), 0)} Items
                     </p>
+                    <p className="mt-1 text-[10px] text-background/60">
+                      {orderTimeLabel(latestOrder.createdAt).replace("Today, ", "Today · ")}
+                    </p>
                   </div>
                   <b className="text-sm text-primary">{money(latestOrder.total)}</b>
                 </div>
+              </div>
+            )}
+            {!latestOrder && (
+              <div className="flex items-center gap-3 rounded-xl bg-background/10 p-3 text-xs text-background/70">
+                <ShoppingBag size={16} className="text-primary" />
+                <span>No latest order to display.</span>
               </div>
             )}
             <Link
@@ -1349,7 +1377,7 @@ function CategoryPage({
 }) {
   const [form, setForm] = useState<any>(null);
   const save = () => {
-    const data = { name: form.name, nameAr: form.nameAr, enabled: form.enabled };
+    const data = { name: form.name, nameAr: form.nameAr, enabled: form.enabled, order: Number(form.order) };
     const done = () => {
       qc.invalidateQueries({ queryKey: getListCategoriesQueryKey() });
       setForm(null);
@@ -1497,15 +1525,10 @@ function CategoryPage({
 
 function OrdersPage() {
   const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("all");
   const [date, setDate] = useState("");
-  const [selected, setSelected] = useState<any>(null);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
-  const q = useListOrders({ search: search || undefined, status: status as any, date: date || undefined });
-  const allOrdersQuery = useListOrders();
+  const q = useListOrders({ search: search || undefined, date: date || undefined });
   const orders: any[] = q.data || [];
-  const allOrders: any[] = allOrdersQuery.data || [];
-  const update = useUpdateOrder();
   const qc = useQueryClient();
   useEffect(() => {
     const client = supabase;
@@ -1529,27 +1552,12 @@ function OrdersPage() {
   }, [qc]);
   if (q.isLoading) return <Loading label="Loading the order board" />;
   if (q.isError) return <ErrorState retry={() => q.refetch()} />;
-  const statuses = [
-    "all",
-    "new",
-    "confirmed",
-    "preparing",
-    "ready",
-    "completed",
-    "cancelled",
-  ];
-  const today = localOrderDay(new Date().toISOString());
-  const todayOrders = allOrders.filter((order) => localOrderDay(order.createdAt) === today);
-  const activeOrders = allOrders.filter((order) => !["completed", "cancelled"].includes(order.status));
-  const completedOrders = allOrders.filter((order) => order.status === "completed");
-  const cancelledOrders = allOrders.filter((order) => order.status === "cancelled");
-  const totalSales = allOrders.filter((order) => order.status !== "cancelled").reduce((sum, order) => sum + Number(order.total ?? 0), 0);
   return (
     <div className="enter">
       <PageIntro
         eyebrow="Order desk"
-        title="Keep the line moving."
-        subtitle={`${orders.length} orders in your view`}
+        title="Order history"
+        subtitle={`${orders.length} orders`}
         action={
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-[#278b68]" />
@@ -1557,13 +1565,6 @@ function OrdersPage() {
           </div>
         }
       />
-      <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        <Metric label="Orders today" value={String(todayOrders.length)} icon={ShoppingBag} tone="mint" />
-        <Metric label="Active orders" value={String(activeOrders.length)} icon={Activity} tone="primary" />
-        <Metric label="Completed" value={String(completedOrders.length)} icon={Check} tone="dark" />
-        <Metric label="Cancelled" value={String(cancelledOrders.length)} icon={X} tone="red" />
-        <Metric label="Total sales" value={money(totalSales)} icon={Wallet} tone="primary" />
-      </div>
       <div className="mb-5 space-y-3">
         <SearchBar value={search} onChange={setSearch} placeholder="Search by order number or table…" />
         <div className="flex flex-wrap items-center gap-2">
@@ -1572,38 +1573,20 @@ function OrdersPage() {
             <input type="date" value={date} onChange={(event) => setDate(event.target.value)} className="bg-transparent text-xs font-bold outline-none" data-testid="input-order-date" />
           </label>
         </div>
-        <div className="flex flex-wrap gap-2 pb-1">
-          {statuses.map((s) => (
-            <button
-              onClick={() => setStatus(s)}
-              key={s}
-              className={`whitespace-nowrap rounded-xl border px-3 py-2 text-[11px] font-bold ${status === s ? "border-primary bg-primary/15" : "border-border bg-card"}`}
-              data-testid={`button-status-${s}`}
-            >
-              {titleize(s)}
-              {s !== "all" && (
-                <span className="mr-1 text-muted-foreground">
-                  · {allOrders.filter((o) => o.status === s).length}
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
       </div>
       <div className="overflow-hidden rounded-2xl border border-card-border bg-card shadow-sm">
-        <div className="hidden grid-cols-[minmax(135px,1.1fr)_minmax(90px,.8fr)_minmax(150px,1.4fr)_minmax(85px,.8fr)_minmax(90px,.8fr)_minmax(100px,.9fr)_auto] gap-4 border-b border-border bg-muted/50 px-5 py-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground md:grid">
+        <div className="hidden grid-cols-[minmax(135px,1.1fr)_minmax(90px,.8fr)_minmax(150px,1.4fr)_minmax(85px,.8fr)_minmax(100px,.9fr)_auto] gap-4 border-b border-border bg-muted/50 px-5 py-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground md:grid">
           <span>Order #</span>
           <span>Table</span>
           <span>Items</span>
           <span>Total</span>
-          <span>Status</span>
           <span>Time</span>
           <span />
         </div>
         {orders.length ? (
           orders.map((o: any) => (
             <div key={o.id} className="border-b border-border last:border-0" data-testid={`row-order-${o.id}`}>
-              <div className="grid min-w-0 gap-3 p-4 hover:bg-muted/40 md:grid-cols-[minmax(135px,1.1fr)_minmax(90px,.8fr)_minmax(150px,1.4fr)_minmax(85px,.8fr)_minmax(90px,.8fr)_minmax(100px,.9fr)_auto] md:items-center md:gap-4 md:px-5">
+              <div className="grid min-w-0 gap-3 p-4 hover:bg-muted/40 md:grid-cols-[minmax(135px,1.1fr)_minmax(90px,.8fr)_minmax(150px,1.4fr)_minmax(85px,.8fr)_minmax(100px,.9fr)_auto] md:items-center md:gap-4 md:px-5">
                 <div>
                   <b className="text-sm">Order #{String(o.number).replace(/^#/, "")}</b>
                 </div>
@@ -1616,38 +1599,15 @@ function OrdersPage() {
                   {o.items?.length ? ` · ${o.items.map((i: any) => `${i.quantity}× ${i.name}`).join(", ")}` : ""}
                 </p>
                 <b className="text-sm"><span className="mr-1 text-[10px] font-normal text-muted-foreground md:hidden">Total</span>{money(o.total)}</b>
-                <Badge
-                  tone={
-                    o.status === "completed"
-                      ? "green"
-                      : o.status === "cancelled"
-                        ? "red"
-                        : o.status === "new"
-                          ? "blue"
-                          : "yellow"
-                  }
-                >
-                  {titleize(o.status)}
-                </Badge>
                 <p className="text-xs text-muted-foreground"><span className="mr-1 text-[10px] font-bold text-foreground md:hidden">Time</span>{orderTimeLabel(o.createdAt)}</p>
                 <div className="flex gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setSelected(o)}
-                    title="View order details"
-                    aria-label="View order details"
-                    className="rounded-lg p-2 hover:bg-muted"
-                    data-testid={`button-view-order-${o.id}`}
-                  >
-                    <Eye size={15} />
-                  </button>
                   <button
                     type="button"
                     onClick={() => setExpandedOrderId((current) => current === o.id ? null : o.id)}
                     title={expandedOrderId === o.id ? "Collapse order details" : "Expand order details"}
                     aria-label={expandedOrderId === o.id ? "Collapse order details" : "Expand order details"}
                     className="rounded-lg bg-primary/15 p-2 text-primary-foreground hover:bg-primary/30"
-                    data-testid={`button-advance-order-${o.id}`}
+                    data-testid={`button-expand-order-${o.id}`}
                   >
                     {expandedOrderId === o.id ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
                   </button>
@@ -1659,19 +1619,11 @@ function OrdersPage() {
         ) : (
           <Empty
             icon={ShoppingBag}
-            title="No orders in this lane"
-            body="Change the filter or enjoy the quiet before the next rush."
+            title="No orders found"
+            body="New dine-in orders will appear here automatically."
           />
         )}
       </div>
-      {selected && (
-        <OrderDetail
-          order={selected}
-          close={() => setSelected(null)}
-          update={update}
-          onUpdated={(nextOrder) => setSelected(nextOrder)}
-        />
-      )}
     </div>
   );
 }
@@ -1690,16 +1642,8 @@ function InlineOrderDetails({ order }: { order: any }) {
           <p className="mt-1 text-sm font-bold">{order.tableNumber ?? "—"}</p>
         </div>
         <div>
-          <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Status</p>
-          <div className="mt-1">
-            <Badge tone={order.status === "completed" ? "green" : order.status === "cancelled" ? "red" : order.status === "new" ? "blue" : "yellow"}>
-              {titleize(order.status)}
-            </Badge>
-          </div>
-        </div>
-        <div>
           <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Time</p>
-          <p className="mt-1 text-sm font-bold">{timeAgo(order.createdAt)}</p>
+          <p className="mt-1 text-sm font-bold">{orderTimeLabel(order.createdAt)}</p>
         </div>
       </div>
       <div className="mt-4">
@@ -1745,109 +1689,6 @@ function InlineOrderDetails({ order }: { order: any }) {
           <span>Total</span>
           <b>{money(order.total)}</b>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function OrderDetail({
-  order,
-  close,
-  update,
-  onUpdated,
-}: {
-  order: any;
-  close: () => void;
-  update: any;
-  onUpdated: (order: any) => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-foreground/30">
-      <div className="h-full w-full max-w-lg overflow-y-auto bg-card p-6 shadow-2xl enter">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-[10px] font-bold uppercase tracking-[.18em] text-primary">
-              Ticket detail
-            </p>
-            <h3 className="font-display text-2xl font-bold">Order #{String(order.number).replace(/^#/, "")}</h3>
-            <p className="mt-1 text-xs text-muted-foreground">{orderTimeLabel(order.createdAt)}</p>
-          </div>
-          <button
-            onClick={close}
-            className="rounded-lg p-2 hover:bg-muted"
-            data-testid="button-close-order-detail"
-          >
-            <X size={19} />
-          </button>
-        </div>
-        <div className="mt-6 rounded-2xl bg-muted p-4">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold">Current status</span>
-            <select
-              value={order.status}
-              disabled={update.isPending}
-              onChange={(event) => update.mutate({ id: order.id, data: { status: event.target.value } }, { onSuccess: onUpdated })}
-              className="rounded-lg border border-border bg-background px-2 py-1 text-xs font-bold"
-              data-testid="select-order-status"
-            >
-              {["new", "confirmed", "preparing", "ready", "completed", "cancelled"].map((status) => <option key={status} value={status}>{titleize(status)}</option>)}
-            </select>
-          </div>
-          <div className="mt-4 flex gap-1">
-            {["new", "confirmed", "preparing", "ready", "completed"].map((s, i) => (
-              <div
-                key={s}
-                className={`h-1.5 flex-1 rounded-full ${["new", "confirmed", "preparing", "ready", "completed"].indexOf(order.status) >= i ? "bg-primary" : "bg-border"}`}
-              />
-            ))}
-          </div>
-        </div>
-        <div className="mt-6 space-y-3">
-          <p className="text-sm font-bold">Table {order.tableNumber ?? "—"}</p>
-          {order.items?.map((it: any, index: number) => (
-            <div className="border-b border-border pb-3 text-sm" key={it.id ?? index}>
-              <div className="flex justify-between gap-3">
-                <span className="min-w-0 break-words"><b>{it.quantity}×</b> {it.name}</span>
-                <b>{money(it.subtotal)}</b>
-              </div>
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                Unit price: {money(it.unitPrice ?? it.price)}
-              </p>
-              {it.addons?.length ? <div className="mt-2 space-y-1 pl-3 text-[11px] text-muted-foreground">
-                <p className="font-bold text-foreground">Add-ons:</p>
-                {it.addons.map((addon: any, addonIndex: number) => <p className="break-words" key={addon.id ?? addonIndex}>- {addon.name} × {addon.quantity ?? 1} — {money(addon.price)}</p>)}
-              </div> : null}
-            </div>
-          ))}
-          <div className="flex justify-between pt-2 text-sm">
-            <span>Subtotal</span>
-            <span>{money(order.subtotal)}</span>
-          </div>
-          <div className="flex justify-between pt-2 font-display text-lg font-bold">
-            <span>Total amount</span>
-            <span>{money(order.total)}</span>
-          </div>
-        </div>
-        {!['completed', 'cancelled'].includes(order.status) && (
-          <Button
-            className="mt-6 w-full"
-            disabled={update.isPending}
-            onClick={() => {
-              update.mutate(
-                { id: order.id, data: { status: "completed" } },
-                {
-                  onSuccess: (updatedOrder: any) => {
-                    onUpdated(updatedOrder);
-                    close();
-                  },
-                },
-              );
-            }}
-            data-testid="button-complete-order"
-          >
-            <Check size={16} /> Mark completed
-          </Button>
-        )}
       </div>
     </div>
   );
@@ -1968,15 +1809,17 @@ function OffersPage() {
   const update = useUpdateOffer();
   const del = useDeleteOffer();
   const qc = useQueryClient();
+  const { toast } = useToast();
   const save = () => {
     const data = { ...form, value: Number(form.value), maxUses: Number(form.maxUses) };
     const done = () => {
       qc.invalidateQueries({ queryKey: getListOffersQueryKey() });
       setForm(null);
     };
+    const failed = (error: any) => toast({ title: "Could not save offer", description: error?.message || "Please try again." });
     form.id
-      ? update.mutate({ id: form.id, data }, { onSuccess: done })
-      : create.mutate({ data }, { onSuccess: done });
+      ? update.mutate({ id: form.id, data }, { onSuccess: done, onError: failed })
+      : create.mutate({ data }, { onSuccess: done, onError: failed });
   };
   if (q.isLoading) return <Loading label="Loading offers" />;
   if (q.isError) return <ErrorState retry={() => q.refetch()} />;
@@ -1995,8 +1838,8 @@ function OffersPage() {
                 type: "percentage",
                 value: 15,
                 code: "",
-                startDate: "2024-06-18",
-                endDate: "2024-07-18",
+                startDate: dateInputValue(),
+                endDate: dateInputValue(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)),
                 maxUses: 100,
                 target: "All customers",
               })
@@ -2170,16 +2013,23 @@ function ContentPage() {
   const q = useGetWebsiteContent();
   const update = useUpdateWebsiteContent();
   const qc = useQueryClient();
+  const { toast } = useToast();
   const [form, setForm] = useState<any>(null);
   useEffect(() => {
     if (q.data && !form) setForm(q.data);
   }, [q.data]);
-  if (q.isLoading || !form) return <Loading label="Loading the public site content" />;
   if (q.isError) return <ErrorState retry={() => q.refetch()} />;
+  if (q.isLoading || !form) return <Loading label="Loading the public site content" />;
   const save = () =>
     update.mutate(
       { data: form },
-      { onSuccess: () => qc.invalidateQueries({ queryKey: getGetWebsiteContentQueryKey() }) },
+      {
+        onSuccess: () => {
+          void qc.invalidateQueries({ queryKey: getGetWebsiteContentQueryKey() });
+          toast({ title: "Content published", description: "The public site content was updated." });
+        },
+        onError: (error: any) => toast({ title: "Could not publish content", description: error?.message || "Please try again." }),
+      },
     );
   return (
     <div className="enter">
@@ -2263,12 +2113,13 @@ function SettingsPage() {
   const q = useGetRestaurantSettings();
   const update = useUpdateRestaurantSettings();
   const qc = useQueryClient();
+  const { toast } = useToast();
   const [form, setForm] = useState<any>(null);
   useEffect(() => {
     if (q.data && !form) setForm(q.data);
   }, [q.data]);
-  if (q.isLoading || !form) return <Loading label="Loading branch settings" />;
   if (q.isError) return <ErrorState retry={() => q.refetch()} />;
+  if (q.isLoading || !form) return <Loading label="Loading branch settings" />;
   const save = () =>
     update.mutate(
       {
@@ -2279,7 +2130,13 @@ function SettingsPage() {
           deliveryTime: Number(form.deliveryTime),
         },
       },
-      { onSuccess: () => qc.invalidateQueries({ queryKey: getGetRestaurantSettingsQueryKey() }) },
+      {
+        onSuccess: () => {
+          void qc.invalidateQueries({ queryKey: getGetRestaurantSettingsQueryKey() });
+          toast({ title: "Settings saved", description: "Branch settings were updated." });
+        },
+        onError: (error: any) => toast({ title: "Could not save settings", description: error?.message || "Please try again." }),
+      },
     );
   return (
     <div className="enter">
