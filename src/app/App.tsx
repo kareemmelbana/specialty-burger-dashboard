@@ -2279,9 +2279,9 @@ function AnalyticsPage() {
           tone="dark"
         />
         <Metric
-          label="Customer growth"
-          value={a?.customerGrowth == null ? "—" : `${a.customerGrowth}%`}
-          icon={Users}
+          label="Orders today"
+          value={a?.ordersToday ? String(a.ordersToday) : "—"}
+          icon={ShoppingBag}
           tone="red"
         />
       </div>
@@ -2293,12 +2293,12 @@ function AnalyticsPage() {
           </div>
         </section>
         <section className="rounded-2xl border border-card-border bg-card p-5 shadow-sm">
-          <h3 className="font-display text-lg font-bold">Service signals</h3>
+          <h3 className="font-display text-lg font-bold">Service Insights</h3>
           <div className="mt-5 space-y-3">
             {[
               ["Peak hour", a?.peakHour ?? "—", Clock3],
-              ["New customers", a?.newCustomers ?? "—", Users],
-              ["Returning customers", a?.returningCustomers ?? "—", TrendingUp],
+              ["Orders today", a?.ordersToday ? String(a.ordersToday) : "—", ShoppingBag],
+              ["Average order", a?.averageOrderToday == null ? "—" : money(a.averageOrderToday), TrendingUp],
             ].map(([l, v, I]: any) => (
               <div className="flex items-center gap-3 rounded-xl bg-muted p-3" key={l}>
                 <div className="grid h-9 w-9 place-items-center rounded-lg bg-card text-primary">
