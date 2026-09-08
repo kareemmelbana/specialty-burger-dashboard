@@ -134,7 +134,9 @@ const nav = [
   { href: "/orders", label: "Orders", ar: "الطلبات", icon: ShoppingBag },
   { href: "/menu", label: "Menu", ar: "القائمة", icon: Box },
   { href: "/menu/categories", label: "Categories", ar: "التصنيفات", icon: Layers3 },
-  { href: "/customers", label: "Customers", ar: "العملاء", icon: Users },
+  // CUSTOMERS FEATURE TEMPORARILY DISABLED
+  // Re-enable when customer profiles / phone-based guest tracking are implemented.
+  // { href: "/customers", label: "Customers", ar: "العملاء", icon: Users },
   { href: "/offers", label: "Offers", ar: "العروض", icon: Tag },
   { href: "/content", label: "Website content", ar: "محتوى الموقع", icon: BookOpen },
   { href: "/analytics", label: "Analytics", ar: "التحليلات", icon: BarChart3 },
@@ -2715,11 +2717,13 @@ function Router() {
           <OrdersPage />
         </Shell>
       </Route>
-      <Route path="/customers">
+      {/* CUSTOMERS FEATURE TEMPORARILY DISABLED
+          Re-enable when customer profiles / phone-based guest tracking are implemented. */}
+      {/* <Route path="/customers">
         <Shell>
           <CustomersPage />
         </Shell>
-      </Route>
+      </Route> */}
       <Route path="/offers">
         <Shell>
           <OffersPage />
