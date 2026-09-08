@@ -65,6 +65,7 @@ import {
   useDeleteCategory,
   useDeleteProduct,
   useDeleteOffer,
+  useDeleteReview,
   useGetAnalytics,
   useGetDashboardSummary,
   useGetRestaurantSettings,
@@ -716,7 +717,7 @@ function Dashboard() {
                 <p className="text-xs font-bold">Latest order</p>
                 <div className="mt-3 flex items-end justify-between gap-3">
                   <div>
-                    <p className="text-sm font-bold">Order #{String(latestOrder.number).replace(/^#/, "")}</p>
+                    <p className="text-[10px] font-semibold">Order #{String(latestOrder.orderNumber).replace(/^#/, "")}</p>
                     <p className="mt-1 text-[10px] text-background/60">
                       Table {latestOrder.tableNumber ?? "—"} · {(latestOrder.items || []).reduce((count: number, item: any) => count + Number(item.quantity ?? 1), 0)} Items
                     </p>
@@ -769,25 +770,14 @@ function Dashboard() {
                   data-testid={`row-recent-order-${o.id}`}
                 >
                   <div className="grid h-9 w-9 place-items-center rounded-xl bg-primary/15 text-xs font-bold">
-                    {o.number?.replace("#", "").slice(-2)}
+                    {o.orderNumber?.replace("#", "").slice(-2)}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-bold">Order #{String(o.number).replace(/^#/, "")}</p>
+                    <p className="text-[10px] font-semibold">Order #{String(o.orderNumber).replace(/^#/, "")}</p>
                     <p className="text-[11px] text-muted-foreground">
-                      {o.tableNumber != null ? `Table ${o.tableNumber} · ` : ""}{timeAgo(o.createdAt)}
+                      {o.tableNumber != null ? `Table ${o.tableNumber} · ` : ""}{orderItemsCount(o.items)} Items · {orderTimeLabel(o.createdAt)}
                     </p>
                   </div>
-                  <Badge
-                    tone={
-                      o.status === "completed"
-                        ? "green"
-                        : o.status === "cancelled"
-                          ? "red"
-                          : "yellow"
-                    }
-                  >
-                    {titleize(o.status)}
-                  </Badge>
                   <b className="w-20 text-left text-sm">{money(o.total)}</b>
                 </Link>
               ))}
@@ -1588,7 +1578,7 @@ function OrdersPage() {
             <div key={o.id} className="border-b border-border last:border-0" data-testid={`row-order-${o.id}`}>
               <div className="grid min-w-0 gap-3 p-4 hover:bg-muted/40 md:grid-cols-[minmax(135px,1.1fr)_minmax(90px,.8fr)_minmax(150px,1.4fr)_minmax(85px,.8fr)_minmax(100px,.9fr)_auto] md:items-center md:gap-4 md:px-5">
                 <div>
-                  <b className="text-sm">Order #{String(o.number).replace(/^#/, "")}</b>
+                  <b className="text-sm">Order #{String(o.orderNumber).replace(/^#/, "")}</b>
                 </div>
                 <div>
                   <p className="text-sm font-bold"><span className="mr-1 text-[10px] font-normal text-muted-foreground md:hidden">Table</span>{o.tableNumber ?? "—"}</p>
@@ -1635,7 +1625,7 @@ function InlineOrderDetails({ order }: { order: any }) {
       <div className="grid gap-3 rounded-xl border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-4">
         <div>
           <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Order</p>
-          <p className="mt-1 text-sm font-bold">#{String(order.number ?? "").replace(/^#/, "") || "—"}</p>
+          <p className="mt-1 text-sm font-bold">#{String(order.orderNumber ?? "").replace(/^#/, "") || "—"}</p>
         </div>
         <div>
           <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Table</p>
@@ -2383,7 +2373,9 @@ function ReviewsPage() {
   const q = useListReviews();
   const sourceReviews: any[] = q.data || [];
   const update = useUpdateReview();
+  const remove = useDeleteReview();
   const qc = useQueryClient();
+  const { toast } = useToast();
   if (q.isLoading) return <Loading label="Loading guest feedback" />;
   if (q.isError) return <ErrorState retry={() => q.refetch()} />;
   const reviews = sourceReviews.map((review: any) => ({
@@ -2395,23 +2387,114 @@ function ReviewsPage() {
     date: review.date ?? review.createdAt ?? review.created_at,
     status: String(review.status ?? "pending").toLowerCase(),
   }));
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
-  const approvedThisMonth = reviews.filter(
-    (review) =>
-      review.status === "approved" &&
-      review.date &&
-      new Date(review.date) >= monthStart,
-  ).length;
-  const averageRating = reviews.length
-    ? reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length
+  const pendingReviews = reviews.filter((review) => review.status === "pending");
+  const approvedReviews = reviews.filter((review) => review.status === "approved");
+  const rejectedReviews = reviews.filter((review) => review.status === "rejected");
+  const averageRating = approvedReviews.length
+    ? approvedReviews.reduce((sum, review) => sum + review.rating, 0) / approvedReviews.length
     : 0;
   const moderate = (r: any, status: string) =>
     update.mutate(
       { id: r.id, data: { status: status as any } },
-      { onSuccess: () => qc.invalidateQueries({ queryKey: getListReviewsQueryKey() }) },
+      {
+        onSuccess: () => {
+          void qc.invalidateQueries({ queryKey: getListReviewsQueryKey() });
+          toast({
+            title: status === "approved" ? "Review approved" : "Review rejected",
+            description: "The review status was saved in Supabase.",
+          });
+        },
+        onError: (error: any) => {
+          toast({
+            title: "Could not update review",
+            description: error?.message || "Check that the signed-in account is an admin.",
+          });
+        },
+      },
     );
+  const resetReview = (r: any) => moderate(r, "pending");
+  const deleteReview = (r: any) => {
+    if (!confirm("Delete this review permanently?")) return;
+    remove.mutate(
+      { id: r.id },
+      {
+        onSuccess: () => {
+          void qc.invalidateQueries({ queryKey: getListReviewsQueryKey() });
+          toast({ title: "Review deleted", description: "The review was removed from Supabase." });
+        },
+        onError: (error: any) => {
+          toast({ title: "Could not delete review", description: error?.message || "Please try again." });
+        },
+      },
+    );
+  };
+  const reviewCard = (r: any) => (
+    <div
+      className="rounded-2xl border border-card-border bg-card p-5 shadow-sm"
+      key={r.id}
+      data-testid={`card-review-${r.id}`}
+    >
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="grid h-10 w-10 place-items-center rounded-full bg-secondary font-bold text-secondary-foreground">
+          {r.customer?.slice(0, 1)}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <b className="text-sm">{r.customer}</b>
+            <Badge tone={r.status === "approved" ? "green" : r.status === "rejected" ? "muted" : "yellow"}>
+              {titleize(r.status)}
+            </Badge>
+          </div>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            {r.city} · {r.product ?? "—"} · {shortDate(r.date)}
+          </p>
+        </div>
+        <div className="text-primary" aria-label={`${r.rating} out of 5 stars`}>
+          {"★".repeat(Math.max(0, Math.min(5, r.rating)))}
+          <span className="text-muted">{"★".repeat(Math.max(0, 5 - r.rating))}</span>
+        </div>
+      </div>
+      <p className="mt-4 text-sm leading-6 text-muted-foreground">“{r.review}”</p>
+      {r.status === "pending" && (
+        <div className="mt-4 flex gap-2">
+          <Button
+            onClick={() => moderate(r, "approved")}
+            disabled={update.isPending}
+            data-testid={`button-approve-review-${r.id}`}
+          >
+            <Check size={14} /> Approve
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => moderate(r, "rejected")}
+            disabled={update.isPending}
+            data-testid={`button-reject-review-${r.id}`}
+          >
+            <X size={14} /> Reject
+          </Button>
+        </div>
+      )}
+      <div className="mt-3 flex gap-2">
+        <Button
+          variant="ghost"
+          onClick={() => resetReview(r)}
+          disabled={update.isPending || remove.isPending}
+          data-testid={`button-reset-review-${r.id}`}
+        >
+          Reset
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={() => deleteReview(r)}
+          disabled={update.isPending || remove.isPending}
+          className="text-destructive hover:text-destructive"
+          data-testid={`button-delete-review-${r.id}`}
+        >
+          <Trash2 size={14} /> Delete
+        </Button>
+      </div>
+    </div>
+  );
   return (
     <div className="enter">
       <PageIntro
@@ -2427,91 +2510,49 @@ function ReviewsPage() {
           </b>
         </div>
         <div className="rounded-2xl border border-card-border bg-card p-4">
-          <p className="text-xs text-muted-foreground">Pending review</p>
+          <p className="text-xs text-muted-foreground">Pending reviews</p>
           <b className="mt-1 block font-display text-3xl">
-            {reviews.filter((r) => r.status === "pending").length}
+            {pendingReviews.length}
           </b>
         </div>
         <div className="rounded-2xl border border-card-border bg-card p-4">
-          <p className="text-xs text-muted-foreground">Approved this month</p>
+          <p className="text-xs text-muted-foreground">Approved reviews</p>
           <b className="mt-1 block font-display text-3xl">
-            {approvedThisMonth}
+            {approvedReviews.length}
           </b>
         </div>
       </div>
-      <div className="space-y-3">
-        {reviews.length ? (
-          reviews.map((r: any) => (
-            <div
-              className="rounded-2xl border border-card-border bg-card p-5 shadow-sm"
-              key={r.id}
-              data-testid={`card-review-${r.id}`}
-            >
-              <div className="flex flex-wrap items-start gap-3">
-                <div className="grid h-10 w-10 place-items-center rounded-full bg-secondary font-bold text-secondary-foreground">
-                  {r.customer?.slice(0, 1)}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <b className="text-sm">{r.customer}</b>
-                    <Badge
-                      tone={
-                        r.status === "approved"
-                          ? "green"
-                          : r.status === "hidden"
-                            ? "muted"
-                            : "yellow"
-                      }
-                    >
-                      {titleize(r.status)}
-                    </Badge>
-                  </div>
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    {r.city} · {r.product ?? "—"} · {shortDate(r.date)}
-                  </p>
-                </div>
-                <div className="text-primary">
-                  {"★".repeat(Math.max(0, Math.min(5, r.rating)))}
-                  <span className="text-muted">
-                    {"★".repeat(Math.max(0, 5 - r.rating))}
-                  </span>
-                </div>
-              </div>
-              <p className="mt-4 text-sm leading-6 text-muted-foreground">“{r.review}”</p>
-              <div className="mt-4 flex gap-2">
-                {r.status !== "approved" && (
-                  <Button
-                    onClick={() => moderate(r, "approved")}
-                    data-testid={`button-approve-review-${r.id}`}
-                  >
-                    <Check size={14} /> Approve
-                  </Button>
-                )}
-                {r.status !== "hidden" && (
-                  <Button
-                    variant="outline"
-                    onClick={() => moderate(r, "hidden")}
-                    data-testid={`button-hide-review-${r.id}`}
-                  >
-                    <EyeOff size={14} /> Hide
-                  </Button>
-                )}
-                <Button
-                  variant="ghost"
-                  onClick={() => moderate(r, "pending")}
-                  data-testid={`button-reset-review-${r.id}`}
-                >
-                  Reset
-                </Button>
-              </div>
+      <div className="space-y-5">
+        <section>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-display text-xl font-bold">Pending reviews</h2>
+            <Badge tone="yellow">{pendingReviews.length}</Badge>
+          </div>
+          <div className="space-y-3">
+            {pendingReviews.length ? pendingReviews.map(reviewCard) : (
+              <Empty icon={Star} title="No pending reviews" body="New website feedback will appear here for review." />
+            )}
+          </div>
+        </section>
+        <section>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-display text-xl font-bold">Approved reviews</h2>
+            <Badge tone="green">{approvedReviews.length}</Badge>
+          </div>
+          <div className="space-y-3">
+            {approvedReviews.length ? approvedReviews.map(reviewCard) : (
+              <Empty icon={Star} title="No approved reviews" body="Approved website feedback will appear here." />
+            )}
+          </div>
+        </section>
+        {rejectedReviews.length > 0 && (
+          <section>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="font-display text-xl font-bold">Rejected reviews</h2>
+              <Badge tone="muted">{rejectedReviews.length}</Badge>
             </div>
-          ))
-        ) : (
-          <Empty
-            icon={Star}
-            title="No reviews waiting"
-            body="The room is quiet. Guest feedback will land here."
-          />
+            <div className="space-y-3">{rejectedReviews.map(reviewCard)}</div>
+          </section>
         )}
       </div>
     </div>

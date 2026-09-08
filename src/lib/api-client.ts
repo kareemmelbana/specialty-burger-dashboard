@@ -15,10 +15,10 @@ type OrderItem = {
   unitPrice?: number; subtotal?: number; addons?: OrderAddon[]; [key: string]: unknown;
 };
 type OrderRecord = {
-  id: string; number?: string; tableNumber?: string | number; items?: OrderItem[]; subtotal?: number;
+  id: string; orderNumber?: string; tableNumber?: string | number; items?: OrderItem[]; subtotal?: number;
   total?: number; createdAt: string; updatedAt?: string; status?: string; [key: string]: unknown;
 };
-type JsonRow = { id: string; data: Record<string, unknown> | null; created_at: string };
+type JsonRow = { id: string; data: Record<string, unknown> | null; status?: string | null; created_at: string };
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
@@ -123,7 +123,8 @@ const offerFromRow = (r: any): Offer => r.data as Offer;
 
 async function jsonRows(table: string): Promise<JsonRow[]> {
   const { client } = await requireUser();
-  const { data, error } = await client.from(table).select("id,data,created_at");
+  const columns = table === "reviews" ? "id,data,status,created_at" : "id,data,created_at";
+  const { data, error } = await client.from(table).select(columns);
   if (error) throw error;
   return (data ?? []) as JsonRow[];
 }
@@ -172,7 +173,7 @@ function normalizeOrder(row: any): OrderRecord {
   const total = storedTotal ?? calculatedSubtotal;
   return {
     id: row.id,
-    number: String(row.order_number ?? ""),
+    orderNumber: String(row.order_number ?? ""),
     tableNumber: row.table_number,
     items,
     subtotal: storedSubtotal ?? calculatedSubtotal,
@@ -244,7 +245,12 @@ export async function createOrderNotification(order: any) {
 async function jsonList(table: string) {
   const rows = await jsonRows(table);
   return rows.map((row) => {
-    const value = { ...(row.data ?? {}), id: row.data?.id ?? row.id, createdAt: row.data?.createdAt ?? row.data?.created_at ?? row.created_at };
+    const value = {
+      ...(row.data ?? {}),
+      ...(table === "reviews" && row.status ? { status: row.status } : {}),
+      id: row.data?.id ?? row.id,
+      createdAt: row.data?.createdAt ?? row.data?.created_at ?? row.created_at,
+    };
     return table === "orders" ? normalizeOrder(value) : value;
   });
 }
@@ -373,7 +379,7 @@ export const useListCategories = () => useQuery({
 export const useListOrders = (params:any={}) => useQuery({
   queryKey:getListOrdersQueryKey(params), refetchInterval:30000, queryFn:async()=>{
     const rows=await listOrders(); const s=String(params.search??"").toLowerCase(), date=params.date;
-    return rows.filter((o:any)=>{const matchesSearch=!s||`${o.number} ${o.tableNumber ?? ""}`.toLowerCase().includes(s);const matchesDate=!date||localDayKey(new Date(o.createdAt))===date;return matchesSearch&&matchesDate;});
+    return rows.filter((o:any)=>{const matchesSearch=!s||`${o.orderNumber} ${o.tableNumber ?? ""}`.toLowerCase().includes(s);const matchesDate=!date||localDayKey(new Date(o.createdAt))===date;return matchesSearch&&matchesDate;});
   }
 });
 export const useListCustomers = (params:any={}) => useQuery({queryKey:getListCustomersQueryKey(params),queryFn:async()=>{
@@ -427,7 +433,15 @@ export const useUpdateOffer=()=>{const queryClient=useQueryClient();return useMu
 export const useDeleteOffer=()=>{const queryClient=useQueryClient();return useMutation({mutationFn:({id}:any)=>jsonDelete("offers",id),onSuccess:()=>invalidateLiveStats(queryClient)});};
 export const useUpdateWebsiteContent=()=>useMutation({mutationFn:async({data}:any)=>{const {client}=await requireUser();const {data:r,error}=await client.from("website_content").select("id").limit(1).single();if(error)throw error;return jsonUpdate("website_content",r.id,data);}});
 export const useUpdateRestaurantSettings=()=>useMutation({mutationFn:async({data}:any)=>{const {client}=await requireUser();const {data:r,error}=await client.from("restaurant_settings").select("id").limit(1).single();if(error)throw error;return jsonUpdate("restaurant_settings",r.id,data);}});
-export const useUpdateReview=()=>useMutation({mutationFn:({id,data}:any)=>jsonUpdate("reviews",id,data)});
+export const useUpdateReview=()=>useMutation({mutationFn:async({id,data}:any)=>{
+  const {client}=await requireUser();
+  const {data:current,error:readError}=await client.from("reviews").select("data").eq("id",id).single();
+  if(readError)throw readError;
+  const next={...(current?.data??{}),...data};
+  const {data:row,error}=await client.from("reviews").update({status:data.status,data:next}).eq("id",id).select("data,status").single();
+  if(error)throw error;
+  return {...(row.data??{}),status:row.status};
+}});
 export const useDeleteReview=()=>useMutation({mutationFn:({id}:any)=>jsonDelete("reviews",id)});
 export const useMarkNotificationRead=()=>useMutation({mutationFn:({id}:any)=>jsonUpdate("notifications",id,{read:true})});
 
